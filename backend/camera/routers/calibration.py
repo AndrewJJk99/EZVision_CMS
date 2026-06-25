@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from utils.camera_grab_v2 import get_frame
 from utils.calibration_manager import (
+    CAPTURE_MAX_EDGE_PX,
     CalibrationConfig,
     MIN_SAMPLES,
     calibration_manager,
@@ -30,8 +31,25 @@ class CalibrationConfigRequest(BaseModel):
     square_size_mm: float = Field(20.0, gt=0, description="한 칸(정사각형) 변 길이 (mm)")
 
 
+CAPTURE_RETRY_COUNT = 10
+CAPTURE_RETRY_DELAY_SEC = 0.08
 FRAME_RETRY_COUNT = 25
 FRAME_RETRY_DELAY_SEC = 0.08
+# 프리뷰는 속도(부드러운 갱신)가 안정감에 더 중요 — 캡처는 원본 해상도 사용
+PREVIEW_STREAM_WIDTH = 1280
+PREVIEW_STREAM_HEIGHT = 720
+
+
+def _cap_max_edge(image_bgr: np.ndarray, max_edge: int) -> np.ndarray:
+    """캡처용 — 업스케일 없이 긴 변만 상한으로 축소 (코너 정밀도 유지)."""
+    h, w = image_bgr.shape[:2]
+    longest = max(w, h)
+    if longest <= max_edge:
+        return image_bgr
+    scale = max_edge / longest
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    return cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
 async def _fetch_bgr(camera_id: int, use_full_resolution: bool = False):
@@ -40,12 +58,16 @@ async def _fetch_bgr(camera_id: int, use_full_resolution: bool = False):
         if use_full_resolution:
             jpeg = await get_frame(camera_id, None, None)
         else:
-            jpeg = await get_frame(camera_id, stream_width=1280, stream_height=720)
+            jpeg = await get_frame(
+                camera_id, PREVIEW_STREAM_WIDTH, PREVIEW_STREAM_HEIGHT
+            )
 
         if jpeg:
             arr = np.frombuffer(jpeg, dtype=np.uint8)
             img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if img is not None:
+                if use_full_resolution:
+                    return _cap_max_edge(img, CAPTURE_MAX_EDGE_PX)
                 return img
 
         if attempt < FRAME_RETRY_COUNT - 1:
@@ -141,17 +163,30 @@ async def capture_sample(camera_id: int):
     if not session.active:
         return JSONResponse(status_code=400, content={"error": "Calibration session is not active"})
 
-    # 스트림 해상도(1280×720) — 원본(4096×3000) JPEG 변환은 10초 이상 걸릴 수 있음
-    image_bgr = await _fetch_bgr(camera_id, use_full_resolution=False)
-    if image_bgr is None:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "error": "No frame available (camera not grabbing or buffer empty — check Monitor & camera status)",
-            },
-        )
+    # 샘플 캡처는 프리뷰와 동일한 스트림 해상도(1280×720) — 검출이 빠르고 안정적.
+    # (원본 해상도는 SaveImageToFileEx 변환이 수초~수십초 걸려 타임아웃 유발)
+    result = None
+    corner_count = session.config.inner_cols * session.config.inner_rows
+    retry_count = max(CAPTURE_RETRY_COUNT, 10 + corner_count // 2)
+    for attempt in range(retry_count):
+        image_bgr = await _fetch_bgr(camera_id, use_full_resolution=False)
+        if image_bgr is None:
+            if attempt < retry_count - 1:
+                await asyncio.sleep(CAPTURE_RETRY_DELAY_SEC)
+                continue
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "No frame available (camera not grabbing or buffer empty — check Monitor & camera status)",
+                },
+            )
 
-    result = session.add_sample(image_bgr)
+        result = session.add_sample(image_bgr)
+        if result.get("success"):
+            break
+        if attempt < retry_count - 1:
+            await asyncio.sleep(CAPTURE_RETRY_DELAY_SEC)
+
     status_code = 200 if result.get("success") else 400
     return JSONResponse(status_code=status_code, content={**result, "status": _session_status(session)})
 

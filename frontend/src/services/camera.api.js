@@ -5,7 +5,8 @@ const UI_CAMERA_API = `${API.ui}/camera`;
 const CAMERA_API = `${API.camera}/camera`;
 const CAMERA_WS_BASE = API.camera.replace(/^http/, 'ws');
 
-export const getFeatureList = () => request(`${UI_CAMERA_API}/get_feature`);
+export const getFeatureList = () =>
+  request(`${UI_CAMERA_API}/get_feature`).then((data) => (Array.isArray(data) ? data : []));
 
 export const saveFeature = (payload) =>
   request(`${UI_CAMERA_API}/save_feature`, {

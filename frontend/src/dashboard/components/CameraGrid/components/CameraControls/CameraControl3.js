@@ -195,8 +195,8 @@ export default function CameraControl3() {
             const cameras = statusData?.cameras || [];
 
             const availableUiNumbers = cameras
-              .filter((c) => c.has_camera)
-              .map((c) => String(c.camera_id + 1));
+              .filter((c) => c.has_camera && c.is_open)
+              .map((c) => String(c.ui_camera_id ?? c.camera_id + 1));
 
             if (availableUiNumbers.length > 0) {
               for (const cameraNum of availableUiNumbers) {
@@ -335,11 +335,14 @@ export default function CameraControl3() {
 
       console.log(`Camera ${cameraNumber} settings loaded:`, feature);
     } catch (error) {
-      console.error(`Error loading camera ${cameraNumber} settings:`, error);
+      const message = error?.data?.error || error.message || 'Unknown error';
       if (showAlert) {
-        alert(`Error loading camera ${cameraNumber} settings: ${error?.data?.error || error.message}`);
+        console.error(`Error loading camera ${cameraNumber} settings:`, error);
+        alert(`Error loading camera ${cameraNumber} settings: ${message}`);
+        throw error;
       }
-      throw error; // 에러를 다시 throw하여 호출자가 처리할 수 있도록
+      console.warn(`Camera ${cameraNumber} feature skipped:`, message);
+      return false;
     }
   };
 
@@ -892,7 +895,7 @@ export default function CameraControl3() {
                     size="large"
                     color="warning"
                     fullWidth
-                    onClick={() => cameraget('1')}        
+                    onClick={() => cameraget('1', true)}        
                   >
                     현재 세팅
                   </Button>
@@ -1106,7 +1109,7 @@ export default function CameraControl3() {
                        size="large"
                        color="warning"
                        fullWidth
-                       onClick={() => cameraget('2')}
+                       onClick={() => cameraget('2', true)}
                      >
                        현재 세팅
                      </Button>
@@ -1320,7 +1323,7 @@ export default function CameraControl3() {
                        size="large"
                        color="warning"
                        fullWidth
-                       onClick={() => cameraget('3')}
+                       onClick={() => cameraget('3', true)}
                      >
                        현재 세팅
                      </Button>
@@ -1532,7 +1535,7 @@ export default function CameraControl3() {
                        size="large"
                        color="warning"
                        fullWidth
-                       onClick={() => cameraget('4')}
+                       onClick={() => cameraget('4', true)}
                      >
                        현재 세팅
                      </Button>

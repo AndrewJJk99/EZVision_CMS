@@ -1,5 +1,4 @@
 import * as React from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
 import List from '@mui/material/List';
 import ListItem from '@mui/material/ListItem';
 import ListItemButton from '@mui/material/ListItemButton';
@@ -7,25 +6,27 @@ import ListItemIcon from '@mui/material/ListItemIcon';
 import ListItemText from '@mui/material/ListItemText';
 import Stack from '@mui/material/Stack';
 import CameraIcon from '@mui/icons-material/Camera';
+import StraightenIcon from '@mui/icons-material/Straighten';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
+import { usePageNav } from '../../context/PageNavContext';
 
 const mainListItems = [
-  { text: 'Camera', icon: <CameraIcon />, path: '/camera' },
-  { text: 'Settings', icon: <SettingsRoundedIcon />, path: '/settings' },
+  { text: 'Calibration', icon: <CameraIcon />, page: 'calibration' },
+  { text: 'CMS', icon: <StraightenIcon />, page: 'cms' },
+  { text: 'Settings', icon: <SettingsRoundedIcon />, page: 'settings' },
 ];
 
 export default function MenuContent({ open = true }) {
-  const navigate = useNavigate();
-  const location = useLocation();
+  const { page, goTo } = usePageNav();
 
   return (
     <Stack sx={{ flexGrow: 1, p: 0.5 }}>
       <List dense>
         {mainListItems.map((item) => (
-          <ListItem key={item.path} disablePadding sx={{ display: 'block' }}>
+          <ListItem key={item.page} disablePadding sx={{ display: 'block' }}>
             <ListItemButton
-              selected={location.pathname === item.path}
-              onClick={() => navigate(item.path)}
+              selected={page === item.page}
+              onClick={() => goTo(item.page)}
               sx={{
                 justifyContent: open ? 'flex-start' : 'center',
                 minHeight: 36,

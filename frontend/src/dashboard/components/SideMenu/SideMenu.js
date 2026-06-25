@@ -57,9 +57,11 @@ export default function SideMenu({ open = true, onToggle }) {
       variant="permanent"
       open={open}
       sx={{
-        display: { xs: 'none', md: 'block' },
+        display: { xs: 'block', md: 'block' },
+        zIndex: (theme) => theme.zIndex.drawer + 2,
         [`& .${drawerClasses.paper}`]: {
           backgroundColor: 'background.paper',
+          zIndex: (theme) => theme.zIndex.drawer + 2,
         },
       }}
     >

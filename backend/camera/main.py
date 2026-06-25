@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
-from routers import camera, calibration
+from routers import camera, calibration, measurement
 from utils.camera_grab_v2 import cameragrab
 from datetime import datetime
 import uvicorn
@@ -77,6 +77,7 @@ app.add_middleware(
 
 app.include_router(camera.router)
 app.include_router(calibration.router)
+app.include_router(measurement.router)
 
 @app.get("/")
 async def root():

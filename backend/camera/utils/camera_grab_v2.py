@@ -451,9 +451,21 @@ class CameraOperation:
                         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
                         if img is not None:
+                            h, w = img.shape[:2]
+                            scale = min(stream_width / w, stream_height / h)
+                            new_w = max(1, int(round(w * scale)))
+                            new_h = max(1, int(round(h * scale)))
                             resized_img = cv2.resize(
-                                img, (stream_width, stream_height), interpolation=cv2.INTER_LINEAR
+                                img, (new_w, new_h), interpolation=cv2.INTER_AREA
                             )
+                            if new_w != stream_width or new_h != stream_height:
+                                canvas = np.zeros(
+                                    (stream_height, stream_width, 3), dtype=img.dtype
+                                )
+                                x0 = (stream_width - new_w) // 2
+                                y0 = (stream_height - new_h) // 2
+                                canvas[y0 : y0 + new_h, x0 : x0 + new_w] = resized_img
+                                resized_img = canvas
                             encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
                             _, jpeg_data = cv2.imencode('.jpg', resized_img, encode_param)
                             jpeg_data = jpeg_data.tobytes()

@@ -1,0 +1,56 @@
+{
+  "camera_id": 0,
+  "created_at": "20260625_112213",
+  "table": [
+    {
+      "y_pixel": 595.31,
+      "height_mm": 2.5,
+      "mean_x": 410.0,
+      "count": 37
+    },
+    {
+      "y_pixel": 589.27,
+      "height_mm": 5.0,
+      "mean_x": 475.0,
+      "count": 89
+    },
+    {
+      "y_pixel": 583.21,
+      "height_mm": 7.5,
+      "mean_x": 564.5,
+      "count": 86
+    },
+    {
+      "y_pixel": 577.5,
+      "height_mm": 10.0,
+      "mean_x": 653.5,
+      "count": 86
+    },
+    {
+      "y_pixel": 571.92,
+      "height_mm": 12.5,
+      "mean_x": 738.0,
+      "count": 81
+    },
+    {
+      "y_pixel": 566.42,
+      "height_mm": 15.0,
+      "mean_x": 823.0,
+      "count": 81
+    },
+    {
+      "y_pixel": 561.5,
+      "height_mm": 17.5,
+      "mean_x": 890.5,
+      "count": 54
+    }
+  ],
+  "calibration_file": "camera_0_calib_20260623_142510.json",
+  "increment_mm": 2.5,
+  "base_mm": 2.5,
+  "reverse_order": false,
+  "image_size": {
+    "width": 1280,
+    "height": 720
+  }
+}

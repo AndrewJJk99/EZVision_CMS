@@ -60,8 +60,14 @@ export function useCalibrationPreview({
           }
         }
 
-        canvas.width = currentDisplayWidth;
-        canvas.height = calculatedHeight;
+        // 크기가 바뀔 때만 canvas 치수를 재설정 (매 프레임 재설정 시 캔버스가
+        // 지워졌다 그려지며 번쩍거림 → 변경 없을 땐 불투명 JPEG로 덮어쓰기만)
+        const targetW = Math.round(currentDisplayWidth);
+        const targetH = Math.round(calculatedHeight);
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+          canvas.width = targetW;
+          canvas.height = targetH;
+        }
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         URL.revokeObjectURL(imageUrl);
       };
@@ -96,7 +102,7 @@ export function useCalibrationPreview({
     };
 
     tick();
-    intervalRef.current = setInterval(tick, 300);
+    intervalRef.current = setInterval(tick, 200);
 
     return () => {
       if (intervalRef.current) {
