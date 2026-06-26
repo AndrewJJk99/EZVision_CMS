@@ -4,7 +4,8 @@ import CssBaseline from '@mui/material/CssBaseline';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import CameraGrid from './components/CameraGrid';
-import CmsGrid from './components/CmsGrid';
+import LutGrid from './components/LutGrid';
+import MeasurementGrid from './components/MeasurementGrid';
 import SettingsGrid from './components/SettingsGrid';
 import SideMenu from './components/SideMenu/SideMenu';
 import AppTheme from '../shared-theme/AppTheme';
@@ -34,7 +35,7 @@ export default function Dashboard() {
       <CssBaseline enableColorScheme />
       <CameraAppProvider>
         <PageNavProvider page={page} goTo={goTo}>
-          <Box sx={{ display: 'flex', minHeight: '100vh', width: '100%' }}>
+          <Box sx={{ display: 'flex', minHeight: '100vh', width: '100%', overflowX: 'hidden' }}>
             <SideMenu open={menuOpen} onToggle={() => setMenuOpen(!menuOpen)} />
             <Box
               component="main"
@@ -44,26 +45,35 @@ export default function Dashboard() {
                 backgroundColor: theme.vars
                   ? `rgba(${theme.vars.palette.background.defaultChannel} / 1)`
                   : alpha(theme.palette.background.default, 1),
-                overflow: 'auto',
+                overflowX: 'hidden',
+                overflowY: page === 'lut' || page === 'measurement' ? 'hidden' : 'auto',
+                display: page === 'lut' || page === 'measurement' ? 'flex' : 'block',
+                flexDirection: 'column',
+                height: page === 'lut' || page === 'measurement' ? '100vh' : undefined,
+                px: { xs: 1.5, md: 3 },
+                pb: page === 'lut' || page === 'measurement' ? { xs: 1.5, md: 2 } : 5,
+                pt: { xs: 1, md: 2 },
+                boxSizing: 'border-box',
               })}
             >
               <Stack
                 spacing={1}
                 sx={{
                   alignItems: 'stretch',
-                  alignSelf: 'stretch',
-                  mx: { xs: 1.5, md: 3 },
-                  pb: 5,
-                  pt: { xs: 1, md: 2 },
-                  width: '100%',
+                  minWidth: 0,
                   maxWidth: '100%',
                   boxSizing: 'border-box',
+                  ...(page === 'lut' || page === 'measurement'
+                    ? { flex: 1, minHeight: 0, overflow: 'hidden' }
+                    : {}),
                 }}
               >
                 {page === 'settings' ? (
                   <SettingsGrid key="settings-page" />
-                ) : page === 'cms' ? (
-                  <CmsGrid key="cms-page" />
+                ) : page === 'lut' ? (
+                  <LutGrid key="lut-page" />
+                ) : page === 'measurement' ? (
+                  <MeasurementGrid key="measurement-page" />
                 ) : (
                   <CameraGrid key="calibration-page" />
                 )}

@@ -22,19 +22,20 @@ const CameraLayout = ({ activeCameras, cameraGridSizes, layoutType }) => {
   // 활성화된 카메라가 없을 때
   if (layoutType === 'empty') {
     return (
-      <Grid size={{ xs: 8, md: 10 }}>
+      <Grid size={{ xs: 12 }}>
         <Box sx={{
           display: 'flex',
           justifyContent: 'center',
           alignItems: 'center',
-          height: '50vh',
-          bgcolor: 'background.paper',
+          height: '40vh',
+          minHeight: 240,
+          bgcolor: 'background.default',
           borderRadius: 1,
           border: '1px dashed',
-          borderColor: 'divider'
+          borderColor: 'divider',
         }}>
-          <Typography color="text.secondary" variant="h6">
-            활성화된 카메라가 없습니다
+          <Typography color="text.secondary" variant="body1">
+            Monitor에서 카메라를 선택하세요
           </Typography>
         </Box>
       </Grid>
@@ -56,25 +57,23 @@ const CameraLayout = ({ activeCameras, cameraGridSizes, layoutType }) => {
 
         // 모니터 개수에 따라 높이 조정
         // 1개일 때: 60vh (비율 줄임), 3개일 때: 45vh, 4개일 때: 45vh
-        let boxHeight = '70vh';
+        let boxHeight = '58vh';
         if (activeCameraCount === 1) {
-          boxHeight = '70vh';  // 1개일 때 비율 줄임
+          boxHeight = '58vh';
         } else if (activeCameraCount === 3) {
-          boxHeight = '35vh';
+          boxHeight = '32vh';
         } else if (activeCameraCount === 4) {
-          boxHeight = '35vh';
+          boxHeight = '32vh';
         }
 
         return (
           <Grid key={cameraId} size={gridSize}>
             <Box sx={{
-              height: boxHeight,  // 고정 높이 사용으로 모든 카메라 동일한 크기 보장
-              bgcolor: 'background.paper',
-              borderRadius: 1,
-              overflow: 'hidden',
+              height: boxHeight,
+              minHeight: activeCameraCount === 1 ? 320 : 220,
               display: 'flex',
               flexDirection: 'column',
-              pt: 0.2  // 상단 여백 최소화
+              minWidth: 0,
             }}>
               <CameraComponent activeCameraCount={activeCameraCount} />
             </Box>

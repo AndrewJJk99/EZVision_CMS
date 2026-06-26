@@ -2,6 +2,10 @@ import React from 'react';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Grid from '@mui/material/Grid2';
+import Card from '@mui/material/Card';
+import CardContent from '@mui/material/CardContent';
+import Divider from '@mui/material/Divider';
+import Typography from '@mui/material/Typography';
 
 import { useCameraApp } from '../context/CameraAppContext';
 import { useCameraLayout } from './CameraGrid/hooks/useCameraLayout';
@@ -23,26 +27,27 @@ export default function CameraGrid() {
 
   return (
     <CalibrationProvider>
-      <Box sx={{ width: '100%', maxWidth: '100%' }}>
+      <Box sx={{ width: '100%', maxWidth: '100%', minWidth: 0 }}>
         <Stack spacing={1} direction="column">
-          <Grid container spacing={1} columns={12} sx={{ mb: 1 }}>
-            <Grid size={{ xs: 12, lg: 4 }}>
+          <Card sx={{ minWidth: 0, overflow: 'hidden' }}>
+            <CardContent sx={{ p: { xs: 1, md: 1.5 }, '&:last-child': { pb: { xs: 1, md: 1.5 } } }}>
               <CameraMonitorControl onCameraStateChange={handleCameraStateChange} />
-            </Grid>
-          </Grid>
 
-          <Grid
-            container
-            spacing={1}
-            columns={12}
-            sx={{ mb: (theme) => theme.spacing(1) }}
-          >
-            <CameraLayout
-              activeCameras={activeCameras}
-              cameraGridSizes={cameraGridSizes}
-              layoutType={layoutType}
-            />
-          </Grid>
+              <Divider sx={{ my: 1 }} />
+
+              <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 1 }}>
+                Camera
+              </Typography>
+
+              <Grid container spacing={1} columns={12} disableEqualOverflow sx={{ minWidth: 0 }}>
+                <CameraLayout
+                  activeCameras={activeCameras}
+                  cameraGridSizes={cameraGridSizes}
+                  layoutType={layoutType}
+                />
+              </Grid>
+            </CardContent>
+          </Card>
 
           <CalibrationPanel />
         </Stack>

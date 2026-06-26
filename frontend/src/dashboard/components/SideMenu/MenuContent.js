@@ -7,12 +7,14 @@ import ListItemText from '@mui/material/ListItemText';
 import Stack from '@mui/material/Stack';
 import CameraIcon from '@mui/icons-material/Camera';
 import StraightenIcon from '@mui/icons-material/Straighten';
+import SquareFootIcon from '@mui/icons-material/SquareFoot';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import { usePageNav } from '../../context/PageNavContext';
 
 const mainListItems = [
   { text: 'Calibration', icon: <CameraIcon />, page: 'calibration' },
-  { text: 'CMS', icon: <StraightenIcon />, page: 'cms' },
+  { text: 'LUT', icon: <StraightenIcon />, page: 'lut' },
+  { text: '측정', icon: <SquareFootIcon />, page: 'measurement' },
   { text: 'Settings', icon: <SettingsRoundedIcon />, page: 'settings' },
 ];
 

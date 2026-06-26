@@ -5,6 +5,8 @@ const MEASUREMENT_API = `${API.camera}/measurement`;
 
 export const listCalibrations = () => request(`${MEASUREMENT_API}/calibrations`);
 
+export const listLuts = () => request(`${MEASUREMENT_API}/luts`);
+
 export const analyzeMeasurement = (cameraIdBackend, payload) =>
   request(`${MEASUREMENT_API}/analyze/${cameraIdBackend}`, {
     method: 'POST',
@@ -36,8 +38,10 @@ export const buildLut = (cameraIdBackend, payload) =>
     timeout: 60000,
   });
 
-export const getLut = (cameraIdBackend) =>
-  request(`${MEASUREMENT_API}/lut/${cameraIdBackend}`);
+export const getLut = (cameraIdBackend, lutFile) => {
+  const qs = lutFile ? `?lut_file=${encodeURIComponent(lutFile)}` : '';
+  return request(`${MEASUREMENT_API}/lut/${cameraIdBackend}${qs}`);
+};
 
 // 단계 C: 두 구간 단차 측정
 export const measureStep = (cameraIdBackend, payload) =>

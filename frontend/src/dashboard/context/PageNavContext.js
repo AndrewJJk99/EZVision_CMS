@@ -14,16 +14,18 @@ export function usePageNav() {
   return React.useContext(PageNavContext);
 }
 
-export const PAGES = ['calibration', 'cms', 'settings'];
+export const PAGES = ['calibration', 'lut', 'measurement', 'settings'];
 
 export function pathToPage(pathname) {
   if (pathname === '/settings') return 'settings';
-  if (pathname === '/cms') return 'cms';
+  if (pathname === '/measurement') return 'measurement';
+  if (pathname === '/lut' || pathname === '/cms') return 'lut';
   return 'calibration';
 }
 
 export function pageToPath(page) {
   if (page === 'settings') return '/settings';
-  if (page === 'cms') return '/cms';
+  if (page === 'measurement') return '/measurement';
+  if (page === 'lut') return '/lut';
   return '/calibration';
 }

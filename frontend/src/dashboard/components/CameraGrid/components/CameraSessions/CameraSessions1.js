@@ -553,10 +553,10 @@ export default function CameraSessions1({
   }, [cameraId, setupWebSocketHandlers]);
 
   return (
-    <Card sx={{ height: '100%', pt: 0.2, pb: 0.2 }}>
+    <Card sx={{ height: '100%', boxShadow: 'none', border: '1px solid', borderColor: 'divider', bgcolor: 'background.default' }}>
       <CardContent sx={{ p: 1, height: '100%', display: 'flex', flexDirection: 'column' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.2, flexShrink: 0 }}>
-          <Typography variant="h6" component="div">
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 0.5, flexShrink: 0, px: 0.5 }}>
+          <Typography variant="subtitle2" component="div" sx={{ fontWeight: 600 }}>
             Camera 1 {calibrationActive ? '(Calibration)' : ''}
           </Typography>
           {showControls && (

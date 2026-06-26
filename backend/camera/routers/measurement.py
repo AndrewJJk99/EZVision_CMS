@@ -37,7 +37,7 @@ _FRAMES = {}
 
 
 def _list_calib_files():
-    return sorted(glob.glob(os.path.join(CALIB_DIR, "*.json")), reverse=True)
+    return sorted(glob.glob(os.path.join(CALIB_DIR, "camera_*_calib_*.json")), reverse=True)
 
 
 def _load_calibration(path: str):
@@ -162,6 +162,7 @@ class LutBuildRequest(BaseModel):
     reverse_order: bool = False
     min_width: int = Field(0, ge=0, le=500)  # 0=자동
     sensitivity: int = Field(50, ge=0, le=100)  # 단 경계 검출 민감도
+    lut_name: Optional[str] = Field(None, max_length=64)
 
 
 class MeasureRequest(BaseModel):
@@ -169,12 +170,14 @@ class MeasureRequest(BaseModel):
     a_x1: int = Field(..., ge=0)
     b_x0: int = Field(..., ge=0)
     b_x1: int = Field(..., ge=0)
+    lut_file: Optional[str] = None
 
 
 class StepsRequest(BaseModel):
     reverse_order: bool = False
     min_width: int = Field(0, ge=0, le=500)  # 0=자동
     sensitivity: int = Field(50, ge=0, le=100)
+    lut_file: Optional[str] = None
 
 
 class AnalyzeRequest(BaseModel):
@@ -185,6 +188,36 @@ class AnalyzeRequest(BaseModel):
     canny_high: int = Field(150, ge=0, le=1000)
     blur_ksize: int = Field(5, ge=1, le=31)
     min_contour_area: int = Field(80, ge=0)
+
+
+@router.get("/luts")
+async def list_luts():
+    items = []
+    for path in lm.list_lut_files(CALIB_DIR):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+        except Exception:
+            continue
+        table = meta.get("table") or []
+        y_range = lm.lut_y_range(meta)
+        fname = os.path.basename(path)
+        items.append(
+            {
+                "file": fname,
+                "camera_id": meta.get("camera_id"),
+                "created_at": meta.get("created_at"),
+                "step_count": meta.get("step_count") or len(table),
+                "increment_mm": meta.get("increment_mm"),
+                "base_mm": meta.get("base_mm"),
+                "reverse_order": meta.get("reverse_order"),
+                "sensitivity": meta.get("sensitivity"),
+                "lut_name": lm.lut_display_name(meta, fname),
+                "calibration_file": meta.get("calibration_file"),
+                "y_range": y_range,
+            }
+        )
+    return {"luts": items}
 
 
 @router.get("/calibrations")
@@ -399,6 +432,10 @@ async def lut_build(camera_id: int, req: LutBuildRequest = LutBuildRequest()):
             cv2.LINE_AA,
         )
 
+    lut_name = (req.lut_name or "").strip() or None
+    if lut_name and not lm._sanitize_lut_slug(lut_name):
+        return JSONResponse(status_code=422, content={"error": "LUT 이름에 사용할 수 있는 문자가 없습니다."})
+
     path = lm.save_lut(
         CALIB_DIR,
         camera_id,
@@ -408,6 +445,8 @@ async def lut_build(camera_id: int, req: LutBuildRequest = LutBuildRequest()):
             "increment_mm": req.increment_mm,
             "base_mm": req.base_mm,
             "reverse_order": req.reverse_order,
+            "sensitivity": req.sensitivity,
+            "lut_name": lut_name,
             "image_size": {"width": int(cw), "height": int(ch)},
         },
     )
@@ -416,6 +455,7 @@ async def lut_build(camera_id: int, req: LutBuildRequest = LutBuildRequest()):
     return {
         "image": img_b64,
         "lut_file": os.path.basename(path),
+        "lut_name": lut_name,
         "table": table,
         "step_count": len(table),
         "image_size": {"width": int(cw), "height": int(ch)},
@@ -430,7 +470,7 @@ async def measure_steps(camera_id: int, req: StepsRequest = StepsRequest()):
     if camera_id < 0 or camera_id >= 4:
         return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
 
-    lut = lm.load_lut(CALIB_DIR, camera_id)
+    lut = lm.load_lut(CALIB_DIR, camera_id, req.lut_file)
     if not lut:
         return JSONResponse(
             status_code=404, content={"error": "저장된 LUT가 없습니다. 먼저 LUT를 생성하세요."}
@@ -450,7 +490,7 @@ async def measure_steps(camera_id: int, req: StepsRequest = StepsRequest()):
             content={"error": "레이저 점이 너무 적습니다. 먼저 캡처 & 검출을 다시 실행하세요."},
         )
 
-    lut_path = lm._lut_path(CALIB_DIR, camera_id)
+    lut_path = lm.resolve_lut_path(CALIB_DIR, camera_id, req.lut_file or lut.get("_lut_file"))
     lut_range = lm.lut_y_range(lut)
 
     clusters, err = None, None
@@ -529,8 +569,8 @@ async def measure_steps(camera_id: int, req: StepsRequest = StepsRequest()):
 
 
 @router.get("/lut/{camera_id}")
-async def lut_get(camera_id: int):
-    lut = lm.load_lut(CALIB_DIR, camera_id)
+async def lut_get(camera_id: int, lut_file: Optional[str] = None):
+    lut = lm.load_lut(CALIB_DIR, camera_id, lut_file)
     if not lut:
         return JSONResponse(
             status_code=404, content={"error": "저장된 LUT가 없습니다. 먼저 LUT를 생성하세요."}
@@ -546,7 +586,7 @@ async def measure(camera_id: int, req: MeasureRequest):
     if camera_id < 0 or camera_id >= 4:
         return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
 
-    lut = lm.load_lut(CALIB_DIR, camera_id)
+    lut = lm.load_lut(CALIB_DIR, camera_id, req.lut_file)
     if not lut:
         return JSONResponse(
             status_code=404, content={"error": "저장된 LUT가 없습니다. 먼저 LUT를 생성하세요."}
@@ -575,7 +615,7 @@ async def measure(camera_id: int, req: MeasureRequest):
     if h_a is None or h_b is None:
         return JSONResponse(status_code=422, content={"error": "LUT 보간 실패"})
 
-    lut_path = lm._lut_path(CALIB_DIR, camera_id)
+    lut_path = lm.resolve_lut_path(CALIB_DIR, camera_id, req.lut_file or lut.get("_lut_file"))
     lut_range = lm.lut_y_range(lut)
 
     overlay = lm.draw_profile(undistorted, profile)

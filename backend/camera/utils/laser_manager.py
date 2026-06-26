@@ -8,8 +8,10 @@
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
+import re
 from datetime import datetime
 from typing import List, Optional, Tuple
 
@@ -524,30 +526,107 @@ def cluster_steps(
     return clusters, None
 
 
-def _lut_path(calib_dir: str, camera_id: int) -> str:
+def _lut_legacy_path(calib_dir: str, camera_id: int) -> str:
     return os.path.join(calib_dir, f"camera_{camera_id}_lut.json")
+
+
+def _sanitize_lut_slug(name: str) -> str:
+    """파일명용 slug (빈 문자열이면 자동 이름 사용)."""
+    text = (name or "").strip()
+    if not text:
+        return ""
+    slug = re.sub(r"[^\w\-가-힣]+", "_", text, flags=re.UNICODE)
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug[:48]
+
+
+def _lut_filename(camera_id: int, created_at: str, lut_name: Optional[str] = None) -> str:
+    slug = _sanitize_lut_slug(lut_name)
+    if slug:
+        return f"camera_{camera_id}_lut_{slug}_{created_at}.json"
+    return f"camera_{camera_id}_lut_{created_at}.json"
+
+
+def lut_name_from_filename(filename: str) -> Optional[str]:
+    """파일명 slug에서 표시용 LUT 이름 추출 (JSON에 없을 때 fallback)."""
+    base = os.path.basename(filename or "")
+    if re.fullmatch(r"camera_\d+_lut\.json", base):
+        return None
+    m = re.match(r"^camera_\d+_lut_(.+)\.json$", base)
+    if not m:
+        return None
+    middle = m.group(1)
+    if re.fullmatch(r"\d{8}_\d{6}", middle):
+        return None
+    tm = re.match(r"^(.+)_(\d{8}_\d{6})$", middle)
+    if not tm:
+        return None
+    slug = tm.group(1).strip()
+    return slug or None
+
+
+def lut_display_name(meta: dict, filename: Optional[str] = None) -> Optional[str]:
+    stored = (meta.get("lut_name") or "").strip()
+    if stored:
+        return stored
+    fname = filename or meta.get("_lut_file") or ""
+    return lut_name_from_filename(fname)
+
+
+def list_lut_files(calib_dir: str, camera_id: Optional[int] = None) -> List[str]:
+    """LUT json 경로 목록 (최신순). camera_id 지정 시 해당 카메라만."""
+    pattern = os.path.join(calib_dir, "camera_*_lut*.json")
+    files = glob.glob(pattern)
+    if camera_id is not None:
+        prefix = f"camera_{camera_id}_lut"
+        files = [f for f in files if os.path.basename(f).startswith(prefix)]
+    return sorted(files, reverse=True)
+
+
+def resolve_lut_path(calib_dir: str, camera_id: int, lut_file: Optional[str] = None) -> Optional[str]:
+    """lut_file 지정 시 해당 파일, 없으면 카메라별 최신 LUT (구형 단일 파일 fallback)."""
+    if lut_file:
+        path = os.path.join(calib_dir, os.path.basename(lut_file))
+        return path if os.path.exists(path) else None
+    files = list_lut_files(calib_dir, camera_id)
+    if files:
+        return files[0]
+    legacy = _lut_legacy_path(calib_dir, camera_id)
+    return legacy if os.path.exists(legacy) else None
 
 
 def save_lut(calib_dir: str, camera_id: int, table: List[dict], meta: dict) -> str:
     os.makedirs(calib_dir, exist_ok=True)
-    path = _lut_path(calib_dir, camera_id)
+    created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
+    lut_name = (meta.get("lut_name") or "").strip() or None
+    filename = _lut_filename(camera_id, created_at, lut_name)
+    path = os.path.join(calib_dir, filename)
     payload = {
         "camera_id": camera_id,
-        "created_at": datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "created_at": created_at,
+        "step_count": len(table),
         "table": table,
-        **meta,
+        **{k: v for k, v in meta.items() if k != "lut_name"},
     }
+    if lut_name:
+        payload["lut_name"] = lut_name
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)
     return path
 
 
-def load_lut(calib_dir: str, camera_id: int) -> Optional[dict]:
-    path = _lut_path(calib_dir, camera_id)
-    if not os.path.exists(path):
+def load_lut(calib_dir: str, camera_id: int, lut_file: Optional[str] = None) -> Optional[dict]:
+    path = resolve_lut_path(calib_dir, camera_id, lut_file)
+    if not path:
         return None
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    data["_lut_file"] = os.path.basename(path)
+    if not (data.get("lut_name") or "").strip():
+        derived = lut_name_from_filename(data["_lut_file"])
+        if derived:
+            data["lut_name"] = derived
+    return data
 
 
 def y_to_height(lut: dict, y: float) -> Optional[float]:
