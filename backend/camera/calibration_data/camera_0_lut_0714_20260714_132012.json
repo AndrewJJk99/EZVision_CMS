@@ -1,0 +1,104 @@
+{
+  "camera_id": 0,
+  "created_at": "20260714_132012",
+  "step_count": 6,
+  "table": [
+    {
+      "y_pixel": 2856.479,
+      "height_mm": 0.0,
+      "mean_x": 2148.0,
+      "count": 85,
+      "std_px": 1.6833,
+      "coverage": 1.0,
+      "x0": 2075,
+      "x1": 2221,
+      "used_x0": 2093,
+      "used_x1": 2203,
+      "source_count": 147
+    },
+    {
+      "y_pixel": 2841.398,
+      "height_mm": 2.5,
+      "mean_x": 2434.0,
+      "count": 217,
+      "std_px": 3.6504,
+      "coverage": 1.0,
+      "x0": 2246,
+      "x1": 2622,
+      "used_x0": 2292,
+      "used_x1": 2576,
+      "source_count": 377
+    },
+    {
+      "y_pixel": 2832.273,
+      "height_mm": 5.0,
+      "mean_x": 2798.5,
+      "count": 202,
+      "std_px": 2.9467,
+      "coverage": 1.0,
+      "x0": 2623,
+      "x1": 2974,
+      "used_x0": 2666,
+      "used_x1": 2931,
+      "source_count": 352
+    },
+    {
+      "y_pixel": 2821.403,
+      "height_mm": 7.5,
+      "mean_x": 3186.0,
+      "count": 215,
+      "std_px": 3.1409,
+      "coverage": 1.0,
+      "x0": 3000,
+      "x1": 3372,
+      "used_x0": 3045,
+      "used_x1": 3327,
+      "source_count": 373
+    },
+    {
+      "y_pixel": 2808.052,
+      "height_mm": 10.0,
+      "mean_x": 3562.5,
+      "count": 216,
+      "std_px": 2.6748,
+      "coverage": 1.0,
+      "x0": 3376,
+      "x1": 3749,
+      "used_x0": 3421,
+      "used_x1": 3704,
+      "source_count": 374
+    },
+    {
+      "y_pixel": 2788.354,
+      "height_mm": 12.5,
+      "mean_x": 3827.5,
+      "count": 86,
+      "std_px": 0.4851,
+      "coverage": 1.0,
+      "x0": 3753,
+      "x1": 3902,
+      "used_x0": 3771,
+      "used_x1": 3884,
+      "source_count": 150
+    }
+  ],
+  "calibration_file": "camera_0_calib_20260714_125513.json",
+  "increment_mm": 2.5,
+  "base_mm": 0.0,
+  "reverse_order": false,
+  "sensitivity": 35,
+  "frame_count": 1,
+  "edge_margin_ratio": 0.12,
+  "trim_ratio": 0.12,
+  "laser_detect": {
+    "roi_y0": null,
+    "roi_y1": null,
+    "detect_mode": "lut"
+  },
+  "image_size": {
+    "width": 4096,
+    "height": 3000
+  },
+  "lut_name": "0714",
+  "image_file": "camera_0_lut_0714_20260714_132012.jpg"
+}

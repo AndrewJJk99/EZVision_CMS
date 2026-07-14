@@ -1,0 +1,97 @@
+{
+  "camera_id": 0,
+  "ui_camera_id": 1,
+  "method": "Zhang (OpenCV calibrateCamera)",
+  "distortion_model": "brown5",
+  "calib_flags": [
+    "USE_INTRINSIC_GUESS",
+    "FIX_ASPECT_RATIO"
+  ],
+  "fix_aspect_ratio": true,
+  "pattern_inner_corners": [
+    8,
+    12
+  ],
+  "square_size_mm": 20.0,
+  "sample_count": 8,
+  "rms_error": 0.5296078504086744,
+  "per_view_errors": [
+    0.05483943917031431,
+    0.05532479569490149,
+    0.052662183355512225,
+    0.053721183340353695,
+    0.05443288245756791,
+    0.05420854171980988,
+    0.05329312086431124,
+    0.05389306548838485
+  ],
+  "excluded_sample_indices": [],
+  "camera_matrix": [
+    [
+      5202.385919211909,
+      0.0,
+      1610.8278126564846
+    ],
+    [
+      0.0,
+      5202.385919211909,
+      1586.3408610611682
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist_coeffs": [
+    -0.010069840678162514,
+    0.11568085089600742,
+    -0.0009222279268588329,
+    0.001171934831340215,
+    -0.468906435169027
+  ],
+  "image_size": {
+    "width": 4096,
+    "height": 3000
+  },
+  "quality": {
+    "pass": false,
+    "level": "fail",
+    "rms_px": 0.5296,
+    "max_per_view_px": 0.0553,
+    "fx_fy_ratio": 1.0,
+    "excluded_samples": [],
+    "excluded_count": 0,
+    "pose_coverage": {
+      "zones_covered": 1,
+      "zones_total": 9,
+      "ratio": 0.11,
+      "missing_hint": "9구역 중 1/9 커버"
+    },
+    "issues": [
+      "RMS 0.530px > 0.5px",
+      "샘플 8장 (권장 12+)",
+      "포즈 다양성 부족 (9구역 중 1/9 커버)"
+    ]
+  },
+  "saved_at": "20260710_160620",
+  "npz_path": "C:\\code\\local_repo\\EZVision_CMS\\backend\\camera\\routers\\..\\calibration_data\\camera_0_calib_20260710_160620.npz",
+  "plane_scale": {
+    "mm_per_px": 0.07862857,
+    "mm_per_px_x": 0.07862857,
+    "mm_per_px_y": 0.07887794,
+    "square_px": 254.3605,
+    "square_px_x": 254.3605,
+    "square_px_y": 253.5563,
+    "square_size_mm": 20.0,
+    "inner_cols": 8,
+    "inner_rows": 12,
+    "calibration_file": "camera_0_calib_20260710_160620.json",
+    "image_size": {
+      "width": 4096,
+      "height": 3000
+    },
+    "formula": "mm_per_px = square_size_mm / square_px",
+    "saved_at": "20260710_160712"
+  }
+}

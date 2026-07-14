@@ -11,6 +11,7 @@ from ctypes import cdll
 import httpx
 import numpy as np
 import cv2
+from typing import Optional
 
 from utils.MvCameraControl_class import *
 from utils.MvErrorDefine_const import *
@@ -21,6 +22,27 @@ project_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(project_path)
 
 logger = logging.getLogger(__name__)
+
+# 모니터/WebSocket·캘리브 프리뷰 표시용 (LUT/측정/샘플 캡처는 원본 BGR)
+STREAM_DISPLAY_WIDTH = 1280
+STREAM_DISPLAY_HEIGHT = 720
+
+
+def letterbox_bgr(bgr: np.ndarray, target_w: int, target_h: int) -> np.ndarray:
+    """비율 유지 + 레터박스로 target 크기에 맞춤."""
+    h, w = bgr.shape[:2]
+    scale = min(target_w / w, target_h / h)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    if new_w == target_w and new_h == target_h:
+        return resized
+    canvas = np.zeros((target_h, target_w, 3), dtype=bgr.dtype)
+    x0 = (target_w - new_w) // 2
+    y0 = (target_h - new_h) // 2
+    canvas[y0 : y0 + new_h, x0 : x0 + new_w] = resized
+    return canvas
+
 
 # HB (High Bandwidth) 포맷 리스트 (RAW 저장 시 디코딩 필요)
 HB_format_list = [
@@ -397,25 +419,38 @@ class CameraOperation:
     
     def get_frame_jpeg(self, stream_width=None, stream_height=None):
         """
-        버퍼에서 JPEG로 변환 (제조사 save_bmp 방식 참고)
-        
-        Args:
-            stream_width: 스트리밍용 너비 (None이면 원본 크기)
-            stream_height: 스트리밍용 높이 (None이면 원본 크기)
-        
-        Returns:
-            bytes: JPEG 이미지 데이터 (해상도 축소된 경우 축소된 크기)
+        버퍼에서 JPEG로 변환 (GetImageForRGB → optional letterbox → imencode).
+
+        stream_width/height가 None이면 카메라 원본. 지정 시 모니터 표시용 축소.
         """
         if not self.b_open_device:
             return None
-        
         try:
-            # 락은 스냅샷 복사만 짧게 잡고, JPEG 변환은 락 밖에서 수행 (그래빙 스레드 블로킹 방지)
+            bgr = self.get_frame_bgr()
+            if bgr is None:
+                return None
+            if stream_width is not None and stream_height is not None:
+                bgr = letterbox_bgr(bgr, stream_width, stream_height)
+            ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if ok:
+                return buf.tobytes()
+            return None
+        except Exception as e:
+            print(f"Camera {self.n_connect_num}: Error in get_frame_jpeg: {e}")
+            return None
+
+    def get_frame_bgr(self) -> Optional[np.ndarray]:
+        """그래빙 버퍼 스냅샷 → BGR numpy (카메라 원본 해상도, 축소 없음).
+
+        SaveImageToFileEx 임시 파일 경로보다 MV_CC_GetImageForRGB가 빠름.
+        """
+        if not self.b_open_device:
+            return None
+        try:
             self.buf_lock.acquire()
             try:
                 if self.buf_save_image is None or self.st_frame_info.nFrameLen <= 0:
                     return None
-
                 frame_len = self.st_frame_info.nFrameLen
                 snap_info = MV_FRAME_OUT_INFO_EX()
                 cdll.msvcrt.memcpy(byref(snap_info), byref(self.st_frame_info), sizeof(MV_FRAME_OUT_INFO_EX))
@@ -424,65 +459,25 @@ class CameraOperation:
             finally:
                 self.buf_lock.release()
 
-            temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
-            temp_file.close()
+            w, h = int(snap_info.nWidth), int(snap_info.nHeight)
+            if w <= 0 or h <= 0:
+                return None
+            n_data = w * h * 3
+            p_data = (c_ubyte * n_data)()
+            snap_info.pBufAddr = cast(snap_buf, POINTER(c_ubyte))
+            ret = self.obj_cam.MV_CC_GetImageForRGB(p_data, n_data, snap_info, 2000)
+            if ret != 0:
+                print(f"Camera {self.n_connect_num}: GetImageForRGB fail ret=0x{ret:x}, fallback jpeg")
+                jpeg = self.get_frame_jpeg(None, None)
+                if not jpeg:
+                    return None
+                img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+                return img
 
-            stSaveParam = MV_SAVE_IMAGE_TO_FILE_PARAM_EX()
-            stSaveParam.enPixelType = snap_info.enPixelType
-            stSaveParam.nWidth = snap_info.nWidth
-            stSaveParam.nHeight = snap_info.nHeight
-            stSaveParam.nDataLen = frame_len
-            stSaveParam.pData = cast(snap_buf, POINTER(c_ubyte))
-            stSaveParam.enImageType = MV_Image_Jpeg
-            stSaveParam.pcImagePath = create_string_buffer(temp_file.name.encode('ascii'))
-            stSaveParam.iMethodValue = 1
-            stSaveParam.nQuality = 90
-
-            ret = self.obj_cam.MV_CC_SaveImageToFileEx(stSaveParam)
-
-            if ret == 0:
-                with open(temp_file.name, 'rb') as f:
-                    jpeg_data = f.read()
-                os.unlink(temp_file.name)
-
-                if stream_width is not None and stream_height is not None:
-                    try:
-                        nparr = np.frombuffer(jpeg_data, np.uint8)
-                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-
-                        if img is not None:
-                            h, w = img.shape[:2]
-                            scale = min(stream_width / w, stream_height / h)
-                            new_w = max(1, int(round(w * scale)))
-                            new_h = max(1, int(round(h * scale)))
-                            resized_img = cv2.resize(
-                                img, (new_w, new_h), interpolation=cv2.INTER_AREA
-                            )
-                            if new_w != stream_width or new_h != stream_height:
-                                canvas = np.zeros(
-                                    (stream_height, stream_width, 3), dtype=img.dtype
-                                )
-                                x0 = (stream_width - new_w) // 2
-                                y0 = (stream_height - new_h) // 2
-                                canvas[y0 : y0 + new_h, x0 : x0 + new_w] = resized_img
-                                resized_img = canvas
-                            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
-                            _, jpeg_data = cv2.imencode('.jpg', resized_img, encode_param)
-                            jpeg_data = jpeg_data.tobytes()
-                    except Exception as resize_error:
-                        print(
-                            f"Camera {self.n_connect_num}: Error resizing image: {resize_error}, returning original"
-                        )
-
-                return jpeg_data
-
-            print(f"Camera {self.n_connect_num}: Save image fail! ret[0x{ret:x}]")
-            if os.path.exists(temp_file.name):
-                os.unlink(temp_file.name)
-            return None
-                
+            img_rgb = np.frombuffer(p_data, dtype=np.uint8).reshape((h, w, 3))
+            return cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
         except Exception as e:
-            print(f"Camera {self.n_connect_num}: Error in get_frame_jpeg: {e}")
+            print(f"Camera {self.n_connect_num}: Error in get_frame_bgr: {e}")
             return None
     
     def save_image(self, file_path, save_type=2, quality=99):
@@ -1002,17 +997,9 @@ class CameraManager:
             traceback.print_exc()
             return None
     
-    async def get_frame(self, camera_id: int, stream_width=1280, stream_height=720):
+    async def get_frame(self, camera_id: int, stream_width=None, stream_height=None):
         """
-        특정 카메라의 프레임을 JPEG로 가져오기 (스트리밍용 해상도 축소)
-        
-        Args:
-            camera_id: 카메라 ID (0-3)
-            stream_width: 스트리밍용 너비 (기본값: 1280)
-            stream_height: 스트리밍용 높이 (기본값: 720)
-        
-        Returns:
-            bytes: JPEG 이미지 데이터 (축소된 해상도)
+        JPEG 프레임. stream_width/height 기본 None → 카메라 원본 해상도.
         """
         if camera_id < 0 or camera_id >= 4:
             return None
@@ -1036,6 +1023,21 @@ class CameraManager:
             return jpeg_data
         except Exception as e:
             print(f"Error getting frame for camera {camera_id}: {e}")
+            return None
+
+    async def get_frame_bgr(self, camera_id: int):
+        """카메라 원본 해상도 BGR numpy (LUT/캘리브/측정용)."""
+        if camera_id < 0 or camera_id >= 4:
+            return None
+        if self.camera_operations[camera_id] is None:
+            return None
+        cam_op = self.camera_operations[camera_id]
+        if not cam_op.b_start_grabbing or cam_op.b_saving:
+            return None
+        try:
+            return await asyncio.to_thread(cam_op.get_frame_bgr)
+        except Exception as e:
+            print(f"Error getting BGR frame for camera {camera_id}: {e}")
             return None
     
     async def stop_grabbing(self):
@@ -1178,19 +1180,17 @@ async def start_grabbing():
 async def stop_grabbing():
     return await camera_manager.stop_grabbing()
 
-async def get_frame(camera_id: int, stream_width=1280, stream_height=720):
+async def get_frame(camera_id: int, stream_width=None, stream_height=None):
     """
-    특정 카메라의 프레임을 JPEG로 가져오기 (스트리밍용 해상도 축소)
-    
-    Args:
-        camera_id: 카메라 ID (0-3)
-        stream_width: 스트리밍용 너비 (기본값: 1280)
-        stream_height: 스트리밍용 높이 (기본값: 720)
-    
-    Returns:
-        bytes: JPEG 이미지 데이터 (축소된 해상도)
+    JPEG 프레임. 기본값 None → 카메라 원본 해상도 (축소 없음).
     """
     return await camera_manager.get_frame(camera_id, stream_width, stream_height)
+
+
+async def get_frame_bgr(camera_id: int):
+    """카메라 원본 해상도 BGR numpy (캘리브/LUT/측정)."""
+    return await camera_manager.get_frame_bgr(camera_id)
+
 
 async def get_frame_save(camera_id: int, save_path=None):
     """프레임 가져오기 및 저장"""

@@ -13,6 +13,7 @@ from utils.camera_grab_v2 import (
     get_feature, set_feature, get_camera_status, get_device_list,
     start_grabbing, stop_grabbing, get_frame, get_frame_save, save_image, cameragrab,
     get_last_saved_path,
+    STREAM_DISPLAY_WIDTH, STREAM_DISPLAY_HEIGHT,
 )
 from schemas import CameraFeatureRequest
 
@@ -217,7 +218,10 @@ async def websocket_endpoint(websocket: WebSocket, camera_id: int):
         frame_ready = False
         for _ in range(5):  # 최대 2.5초 대기 (0.5초 * 5)
             try:
-                frame = await asyncio.wait_for(get_frame(camera_id, stream_width=1280, stream_height=720), timeout=0.3)
+                frame = await asyncio.wait_for(
+                    get_frame(camera_id, STREAM_DISPLAY_WIDTH, STREAM_DISPLAY_HEIGHT),
+                    timeout=3.0,
+                )
                 if frame is not None:
                     frame_ready = True
                     break
@@ -247,7 +251,10 @@ async def websocket_endpoint(websocket: WebSocket, camera_id: int):
             try:
                 # 타임아웃을 설정하여 프레임 가져오기 (최대 0.5초로 증가)
                 # 저장 중일 때는 None이 반환되므로 프레임 전송을 건너뜀
-                frame = await asyncio.wait_for(get_frame(camera_id, stream_width=1280, stream_height=720), timeout=0.5)
+                frame = await asyncio.wait_for(
+                    get_frame(camera_id, STREAM_DISPLAY_WIDTH, STREAM_DISPLAY_HEIGHT),
+                    timeout=3.0,
+                )
                 
                 if frame is not None:
                     try:
@@ -307,8 +314,7 @@ async def websocket_endpoint(websocket: WebSocket, camera_id: int):
                     print(f"Camera {camera_id}: Frame error ({consecutive_failures} failures): {frame_error}")
                     break
                 
-            # 프레임 전송 간격 조정 (여러 카메라 동시 스트리밍 시 부하 분산)
-            await asyncio.sleep(0.2)  # 안정적인 전송을 위해 0.2초로 설정
+            await asyncio.sleep(0.08)
     except WebSocketDisconnect:
         print(f"Client disconnected from camera {camera_id}")
     except Exception as e:

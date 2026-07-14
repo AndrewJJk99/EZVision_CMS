@@ -15,6 +15,7 @@ export function useCalibrationPreview({
 }) {
   const intervalRef = useRef(null);
   const inFlightRef = useRef(false);
+  const pausedRef = useRef(false);
 
   const drawBlob = useCallback(
     (blob) => {
@@ -86,7 +87,13 @@ export function useCalibrationPreview({
       return undefined;
     }
 
+    const handleBusy = (event) => {
+      pausedRef.current = Boolean(event.detail?.busy);
+    };
+    window.addEventListener('calibrationCaptureBusy', handleBusy);
+
     const tick = async () => {
+      if (pausedRef.current) return;
       if (inFlightRef.current) return;
       inFlightRef.current = true;
       try {
@@ -102,9 +109,10 @@ export function useCalibrationPreview({
     };
 
     tick();
-    intervalRef.current = setInterval(tick, 200);
+    intervalRef.current = setInterval(tick, 500);
 
     return () => {
+      window.removeEventListener('calibrationCaptureBusy', handleBusy);
       if (intervalRef.current) {
         clearInterval(intervalRef.current);
         intervalRef.current = null;

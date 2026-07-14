@@ -473,6 +473,16 @@ export default function CameraSessions1({
     };
   }, [checkAndStartStreaming, isStreaming, setupWebSocketHandlers]);
 
+  // 캘리브레이션 종료 후 모니터 WebSocket 자동 재연결
+  React.useEffect(() => {
+    if (calibrationActive) return undefined;
+    autoStartCheckedRef.current = false;
+    const timer = setTimeout(() => {
+      checkAndStartStreaming();
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [calibrationActive, checkAndStartStreaming]);
+
   // 스트리밍 이벤트 리스너
   React.useEffect(() => {
     console.log('[CameraSessions1] Component mounted, setting up event listeners');

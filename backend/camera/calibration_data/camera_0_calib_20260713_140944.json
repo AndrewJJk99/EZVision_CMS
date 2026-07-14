@@ -1,0 +1,96 @@
+{
+  "camera_id": 0,
+  "ui_camera_id": 1,
+  "method": "Zhang (OpenCV calibrateCamera)",
+  "distortion_model": "brown5",
+  "calib_flags": [
+    "USE_INTRINSIC_GUESS",
+    "FIX_ASPECT_RATIO"
+  ],
+  "fix_aspect_ratio": true,
+  "pattern_inner_corners": [
+    8,
+    12
+  ],
+  "square_size_mm": 20.0,
+  "sample_count": 8,
+  "rms_error": 0.2856460083326559,
+  "per_view_errors": [
+    0.028009650783188022,
+    0.030022879652732242,
+    0.029729261191256545,
+    0.02911838142072476,
+    0.027618533683606547,
+    0.02926707677086407,
+    0.029605328399519334,
+    0.029762813860942098
+  ],
+  "excluded_sample_indices": [],
+  "camera_matrix": [
+    [
+      4477.434295092161,
+      0.0,
+      1979.3097216275228
+    ],
+    [
+      0.0,
+      4477.434295092161,
+      1231.5228665629363
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist_coeffs": [
+    0.00609745558595471,
+    -0.14892875862669402,
+    -0.0002624609467321201,
+    -0.0004279429710261147,
+    0.6458152511796235
+  ],
+  "image_size": {
+    "width": 4096,
+    "height": 3000
+  },
+  "quality": {
+    "pass": false,
+    "level": "warn",
+    "rms_px": 0.2856,
+    "max_per_view_px": 0.03,
+    "fx_fy_ratio": 1.0,
+    "excluded_samples": [],
+    "excluded_count": 0,
+    "pose_coverage": {
+      "zones_covered": 1,
+      "zones_total": 9,
+      "ratio": 0.11,
+      "missing_hint": "9구역 중 1/9 커버"
+    },
+    "issues": [
+      "샘플 8장 (권장 12+)",
+      "포즈 다양성 부족 (9구역 중 1/9 커버)"
+    ]
+  },
+  "saved_at": "20260713_140944",
+  "npz_path": "C:\\code\\local_repo\\EZVision_CMS\\backend\\camera\\routers\\..\\calibration_data\\camera_0_calib_20260713_140944.npz",
+  "plane_scale": {
+    "mm_per_px": 0.10721167,
+    "mm_per_px_x": 0.10721167,
+    "mm_per_px_y": 0.10734814,
+    "square_px": 186.5469,
+    "square_px_x": 186.5469,
+    "square_px_y": 186.3097,
+    "square_size_mm": 20.0,
+    "inner_cols": 8,
+    "inner_rows": 12,
+    "calibration_file": "camera_0_calib_20260713_140944.json",
+    "image_size": {
+      "width": 4096,
+      "height": 3000
+    },
+    "formula": "mm_per_px = square_size_mm / square_px",
+    "saved_at": "20260713_140953"
+  }
+}

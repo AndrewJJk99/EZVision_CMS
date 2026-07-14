@@ -59,7 +59,7 @@ export const stopCalibration = (cameraIdBackend) =>
 export const captureCalibrationSample = (cameraIdBackend) =>
   request(`${CALIBRATION_API}/capture/${cameraIdBackend}`, {
     method: 'POST',
-    timeout: 60000,
+    timeout: 120000,
   });
 
 export const runCalibration = (cameraIdBackend) =>
@@ -68,8 +68,10 @@ export const runCalibration = (cameraIdBackend) =>
     timeout: 60000,
   });
 
-export const saveCalibration = (cameraIdBackend) =>
-  request(`${CALIBRATION_API}/save/${cameraIdBackend}`, { method: 'POST' });
+export const saveCalibration = (cameraIdBackend, force = false) =>
+  request(`${CALIBRATION_API}/save/${cameraIdBackend}?force=${force ? 'true' : 'false'}`, {
+    method: 'POST',
+  });
 
 export const resetCalibrationSamples = (cameraIdBackend) =>
   request(`${CALIBRATION_API}/reset/${cameraIdBackend}`, { method: 'POST' });

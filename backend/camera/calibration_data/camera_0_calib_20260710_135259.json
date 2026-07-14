@@ -1,0 +1,81 @@
+{
+  "camera_id": 0,
+  "ui_camera_id": 1,
+  "method": "Zhang (OpenCV calibrateCamera)",
+  "distortion_model": "brown5",
+  "calib_flags": [
+    "USE_INTRINSIC_GUESS",
+    "FIX_ASPECT_RATIO"
+  ],
+  "fix_aspect_ratio": true,
+  "pattern_inner_corners": [
+    8,
+    12
+  ],
+  "square_size_mm": 20.0,
+  "sample_count": 10,
+  "rms_error": 0.40983602532035124,
+  "per_view_errors": [
+    0.035685476746610566,
+    0.03480517860722745,
+    0.039440334995186045,
+    0.040774952857221894,
+    0.04950236585804187,
+    0.04922921708318847,
+    0.03809176557621897,
+    0.03779240219792545,
+    0.04872315528531961,
+    0.040815885465939346
+  ],
+  "excluded_sample_indices": [],
+  "camera_matrix": [
+    [
+      10475.189967495238,
+      0.0,
+      2028.9112750555455
+    ],
+    [
+      0.0,
+      10475.189967495238,
+      1677.5919252587526
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist_coeffs": [
+    -0.01038677107285059,
+    0.017168110842610215,
+    -0.0004794546626033864,
+    -0.0014615972263327065,
+    2.9475941817262794
+  ],
+  "image_size": {
+    "width": 4096,
+    "height": 3000
+  },
+  "quality": {
+    "pass": false,
+    "level": "warn",
+    "rms_px": 0.4098,
+    "max_per_view_px": 0.0495,
+    "fx_fy_ratio": 1.0,
+    "excluded_samples": [],
+    "excluded_count": 0,
+    "pose_coverage": {
+      "zones_covered": 2,
+      "zones_total": 9,
+      "ratio": 0.22,
+      "missing_hint": "9구역 중 2/9 커버"
+    },
+    "issues": [
+      "RMS 0.410px > 권장 0.35px",
+      "샘플 10장 (권장 12+)",
+      "포즈 다양성 부족 (9구역 중 2/9 커버)"
+    ]
+  },
+  "saved_at": "20260710_135259",
+  "npz_path": "C:\\code\\local_repo\\EZVision_CMS\\backend\\camera\\routers\\..\\calibration_data\\camera_0_calib_20260710_135259.npz"
+}

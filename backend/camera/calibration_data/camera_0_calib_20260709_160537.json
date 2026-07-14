@@ -1,0 +1,85 @@
+{
+  "camera_id": 0,
+  "ui_camera_id": 1,
+  "method": "Zhang (OpenCV calibrateCamera)",
+  "distortion_model": "brown5",
+  "calib_flags": [
+    "USE_INTRINSIC_GUESS",
+    "FIX_ASPECT_RATIO"
+  ],
+  "fix_aspect_ratio": true,
+  "pattern_inner_corners": [
+    8,
+    12
+  ],
+  "square_size_mm": 20.0,
+  "sample_count": 15,
+  "rms_error": 0.4517788696765867,
+  "per_view_errors": [
+    0.04503507930571765,
+    0.05253753901949209,
+    0.04335215991410465,
+    0.04075611133406908,
+    0.028874333421938556,
+    0.027717970515710066,
+    0.05432931653227379,
+    0.0514553479378533,
+    0.03851527469316909,
+    0.040628766274887824,
+    0.026827317851623258,
+    0.030726778608926957,
+    0.06196804599200625,
+    0.06403884381982153,
+    0.060183955751323355
+  ],
+  "excluded_sample_indices": [],
+  "camera_matrix": [
+    [
+      10125.586479224394,
+      0.0,
+      2018.609030978682
+    ],
+    [
+      0.0,
+      10125.586479224394,
+      1571.4640380896196
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist_coeffs": [
+    -0.022439499936303262,
+    0.5076533375311332,
+    -0.001873763230414597,
+    -0.0017675201241014432,
+    -2.456283326393963
+  ],
+  "image_size": {
+    "width": 4096,
+    "height": 3000
+  },
+  "quality": {
+    "pass": false,
+    "level": "warn",
+    "rms_px": 0.4518,
+    "max_per_view_px": 0.064,
+    "fx_fy_ratio": 1.0,
+    "excluded_samples": [],
+    "excluded_count": 0,
+    "pose_coverage": {
+      "zones_covered": 4,
+      "zones_total": 9,
+      "ratio": 0.44,
+      "missing_hint": "9구역 중 4/9 커버"
+    },
+    "issues": [
+      "RMS 0.452px > 권장 0.35px",
+      "포즈 다양성 부족 (9구역 중 4/9 커버)"
+    ]
+  },
+  "saved_at": "20260709_160537",
+  "npz_path": "C:\\code\\local_repo\\EZVision_CMS\\backend\\camera\\routers\\..\\calibration_data\\camera_0_calib_20260709_160537.npz"
+}

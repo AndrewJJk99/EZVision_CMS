@@ -12,11 +12,16 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-from utils.camera_grab_v2 import get_frame
+from utils.camera_grab_v2 import (
+    get_frame_bgr,
+    letterbox_bgr,
+    STREAM_DISPLAY_WIDTH,
+    STREAM_DISPLAY_HEIGHT,
+)
 from utils.calibration_manager import (
-    CAPTURE_MAX_EDGE_PX,
     CalibrationConfig,
     MIN_SAMPLES,
+    RECOMMENDED_SAMPLES,
     calibration_manager,
 )
 
@@ -29,51 +34,43 @@ class CalibrationConfigRequest(BaseModel):
     inner_cols: int = Field(3, ge=2, le=20, description="체커보드 내부 코너 열 수")
     inner_rows: int = Field(3, ge=2, le=20, description="체커보드 내부 코너 행 수")
     square_size_mm: float = Field(20.0, gt=0, description="한 칸(정사각형) 변 길이 (mm)")
+    distortion_model: str = Field("brown5", description="brown5 | rational")
+    fix_aspect_ratio: bool = Field(True, description="fx≈fy 고정 (CALIB_FIX_ASPECT_RATIO)")
 
 
-CAPTURE_RETRY_COUNT = 10
-CAPTURE_RETRY_DELAY_SEC = 0.08
-FRAME_RETRY_COUNT = 25
-FRAME_RETRY_DELAY_SEC = 0.08
-# 프리뷰는 속도(부드러운 갱신)가 안정감에 더 중요 — 캡처는 원본 해상도 사용
-PREVIEW_STREAM_WIDTH = 1280
-PREVIEW_STREAM_HEIGHT = 720
+CAPTURE_RETRY_COUNT = 2
+CAPTURE_RETRY_DELAY_SEC = 0.12
+CAPTURE_DETECT_TIMEOUT_SEC = 20.0
+FRAME_RETRY_COUNT = 30
+FRAME_RETRY_DELAY_SEC = 0.12
+
+# 카메라 BGR 접근 직렬화 (프리뷰 폭주 시 캡처·그래빙 경합 완화)
+_bgr_locks: dict[int, asyncio.Lock] = {i: asyncio.Lock() for i in range(4)}
 
 
-def _cap_max_edge(image_bgr: np.ndarray, max_edge: int) -> np.ndarray:
-    """캡처용 — 업스케일 없이 긴 변만 상한으로 축소 (코너 정밀도 유지)."""
-    h, w = image_bgr.shape[:2]
-    longest = max(w, h)
-    if longest <= max_edge:
-        return image_bgr
-    scale = max_edge / longest
-    new_w = max(1, int(round(w * scale)))
-    new_h = max(1, int(round(h * scale)))
-    return cv2.resize(image_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-
-async def _fetch_bgr(camera_id: int, use_full_resolution: bool = False):
-    """그래빙 버퍼가 비어 있을 수 있어 짧게 재시도합니다."""
-    for attempt in range(FRAME_RETRY_COUNT):
-        if use_full_resolution:
-            jpeg = await get_frame(camera_id, None, None)
-        else:
-            jpeg = await get_frame(
-                camera_id, PREVIEW_STREAM_WIDTH, PREVIEW_STREAM_HEIGHT
-            )
-
-        if jpeg:
-            arr = np.frombuffer(jpeg, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+async def _fetch_bgr(camera_id: int, retry_count: int = FRAME_RETRY_COUNT):
+    """카메라 원본 해상도 BGR (샘플 캡처·솔브용)."""
+    lock = _bgr_locks[camera_id]
+    async with lock:
+        for attempt in range(max(1, int(retry_count))):
+            img = await get_frame_bgr(camera_id)
             if img is not None:
-                if use_full_resolution:
-                    return _cap_max_edge(img, CAPTURE_MAX_EDGE_PX)
                 return img
-
-        if attempt < FRAME_RETRY_COUNT - 1:
-            await asyncio.sleep(FRAME_RETRY_DELAY_SEC)
-
+            if attempt < retry_count - 1:
+                await asyncio.sleep(FRAME_RETRY_DELAY_SEC)
     return None
+
+
+async def _fetch_bgr_preview(camera_id: int):
+    """프리뷰용 — 원본 1회 취득 후 1280×720 표시 해상도로 축소."""
+    lock = _bgr_locks[camera_id]
+    if lock.locked():
+        return None
+    async with lock:
+        img = await get_frame_bgr(camera_id)
+        if img is None:
+            return None
+        return letterbox_bgr(img, STREAM_DISPLAY_WIDTH, STREAM_DISPLAY_HEIGHT)
 
 
 def _session_status(session) -> dict:
@@ -89,10 +86,18 @@ def _session_status(session) -> dict:
             "inner_cols": session.config.inner_cols,
             "inner_rows": session.config.inner_rows,
             "square_size_mm": session.config.square_size_mm,
+            "distortion_model": session.config.distortion_model,
+            "fix_aspect_ratio": session.config.fix_aspect_ratio,
         },
         "calibrated": session.camera_matrix is not None,
         "rms_error": session.rms_error,
         "per_view_errors": session.per_view_errors,
+        "excluded_sample_indices": session.excluded_sample_indices,
+        "quality_report": session.quality_report,
+        "quality_guide": session.quality_guide(),
+        "recommended_samples": RECOMMENDED_SAMPLES,
+        "distortion_model": session.config.distortion_model,
+        "calib_flags": session.calib_flags,
         "image_size": (
             {"width": session.image_size[0], "height": session.image_size[1]}
             if session.image_size
@@ -117,6 +122,8 @@ async def start_calibration(camera_id: int, config: CalibrationConfigRequest = C
         inner_cols=config.inner_cols,
         inner_rows=config.inner_rows,
         square_size_mm=config.square_size_mm,
+        distortion_model=config.distortion_model,
+        fix_aspect_ratio=config.fix_aspect_ratio,
     )
     session = calibration_manager.start(camera_id, cfg)
     return {"message": "Calibration session started", "status": _session_status(session)}
@@ -132,22 +139,22 @@ async def stop_calibration(camera_id: int):
 
 @router.get("/preview/{camera_id}")
 async def calibration_preview(camera_id: int):
-    """실시간 체커보드 검출 오버레이 JPEG (모니터링 화면용)"""
+    """체커보드 검출 오버레이 JPEG (표시용 1280×720, 샘플은 원본 캡처)."""
     if camera_id < 0 or camera_id >= 4:
         return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
 
     session = calibration_manager.get_session(camera_id)
-    image_bgr = await _fetch_bgr(camera_id, use_full_resolution=False)
+    image_bgr = await _fetch_bgr_preview(camera_id)
     if image_bgr is None:
         return JSONResponse(
             status_code=503,
             content={
-                "error": "No frame available (camera not grabbing or buffer empty — check Monitor & camera status)",
+                "error": "No frame available (camera busy or buffer empty — check Monitor & camera status)",
             },
         )
 
     annotated, _info = session.preview_overlay(image_bgr)
-    ok, buf = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+    ok, buf = cv2.imencode(".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
         return JSONResponse(status_code=500, content={"error": "Failed to encode preview"})
 
@@ -163,14 +170,13 @@ async def capture_sample(camera_id: int):
     if not session.active:
         return JSONResponse(status_code=400, content={"error": "Calibration session is not active"})
 
-    # 샘플 캡처는 프리뷰와 동일한 스트림 해상도(1280×720) — 검출이 빠르고 안정적.
-    # (원본 해상도는 SaveImageToFileEx 변환이 수초~수십초 걸려 타임아웃 유발)
     result = None
-    corner_count = session.config.inner_cols * session.config.inner_rows
-    retry_count = max(CAPTURE_RETRY_COUNT, 10 + corner_count // 2)
+    last_error = None
+    retry_count = CAPTURE_RETRY_COUNT
     for attempt in range(retry_count):
-        image_bgr = await _fetch_bgr(camera_id, use_full_resolution=False)
+        image_bgr = await _fetch_bgr(camera_id, retry_count=2)
         if image_bgr is None:
+            last_error = "프레임 없음"
             if attempt < retry_count - 1:
                 await asyncio.sleep(CAPTURE_RETRY_DELAY_SEC)
                 continue
@@ -181,14 +187,35 @@ async def capture_sample(camera_id: int):
                 },
             )
 
-        result = session.add_sample(image_bgr)
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(session.add_sample, image_bgr),
+                timeout=CAPTURE_DETECT_TIMEOUT_SEC,
+            )
+        except asyncio.TimeoutError:
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "success": False,
+                    "message": "샘플 캡처 실패: 원본 이미지 체커보드 검출 시간이 너무 깁니다",
+                    "status": _session_status(session),
+                },
+            )
         if result.get("success"):
             break
+        last_error = result.get("message") or result.get("error")
         if attempt < retry_count - 1:
             await asyncio.sleep(CAPTURE_RETRY_DELAY_SEC)
 
     status_code = 200 if result.get("success") else 400
-    return JSONResponse(status_code=status_code, content={**result, "status": _session_status(session)})
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            **result,
+            "message": result.get("message") or last_error or "샘플 캡처 실패",
+            "status": _session_status(session),
+        },
+    )
 
 
 @router.post("/run/{camera_id}")
@@ -197,20 +224,35 @@ async def run_calibration(camera_id: int):
         return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
 
     session = calibration_manager.get_session(camera_id)
-    result = session.run_calibration()
+    try:
+        result = session.run_calibration()
+    except cv2.error as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": f"OpenCV calibration failed: {str(e)}",
+                "status": _session_status(session),
+            },
+        )
     status_code = 200 if result.get("success") else 400
     return JSONResponse(status_code=status_code, content={**result, "status": _session_status(session)})
 
 
 @router.post("/save/{camera_id}")
-async def save_calibration(camera_id: int):
+async def save_calibration(camera_id: int, force: bool = False):
     if camera_id < 0 or camera_id >= 4:
         return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
 
     session = calibration_manager.get_session(camera_id)
     try:
-        path = session.save(CALIB_SAVE_DIR)
-        return {"success": True, "message": "캘리브레이션 결과 저장됨", "path": path}
+        path = session.save(CALIB_SAVE_DIR, force=force)
+        return {
+            "success": True,
+            "message": "캘리브레이션 결과 저장됨",
+            "path": path,
+            "quality": session.quality_report,
+        }
     except ValueError as e:
         return JSONResponse(status_code=400, content={"error": str(e)})
 

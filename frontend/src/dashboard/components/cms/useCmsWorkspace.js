@@ -8,42 +8,27 @@ export function useCmsWorkspace() {
   const [calibrations, setCalibrations] = React.useState([]);
   const [calibFile, setCalibFile] = React.useState('');
 
-  const [method, setMethod] = React.useState('auto');
-  const [blueBoost, setBlueBoost] = React.useState(true);
-  const [threshOffset, setThreshOffset] = React.useState(0);
-  const [hLow, setHLow] = React.useState(90);
-  const [hHigh, setHHigh] = React.useState(130);
-  const [sMin, setSMin] = React.useState(80);
-  const [vMin, setVMin] = React.useState(80);
-  const [bridgeGap, setBridgeGap] = React.useState(25);
-  const [roiEnabled, setRoiEnabled] = React.useState(false);
-  const [roiY, setRoiY] = React.useState([0, 720]);
-
-  const [resultImage, setResultImage] = React.useState(null);
-  const [imgWidth, setImgWidth] = React.useState(1280);
-  const [imgHeight, setImgHeight] = React.useState(720);
+  const [resultImage, setResultImage] = React.useState(null); // 레이저 확대본
+  const [resultImageFull, setResultImageFull] = React.useState(null); // 원본 전체
+  const [resultCrop, setResultCrop] = React.useState(null); // {x0,y0,x1,y1}
+  const [imgWidth, setImgWidth] = React.useState(4096);
+  const [imgHeight, setImgHeight] = React.useState(3000);
   const [detectInfo, setDetectInfo] = React.useState(null);
+
+  // 응답의 확대본/원본/crop을 한 번에 반영
+  const applyImages = React.useCallback((res) => {
+    if (!res) return;
+    setResultImage(res.image ?? null);
+    setResultImageFull(res.image_full ?? res.image ?? null);
+    setResultCrop(res.crop ?? null);
+  }, []);
 
   const [loading, setLoading] = React.useState(false);
   const [message, setMessage] = React.useState('');
   const [severity, setSeverity] = React.useState('info');
 
-  const detectionPayload = React.useCallback(
-    () => ({
-      method,
-      blue_boost: blueBoost,
-      thresh_offset: threshOffset,
-      h_low: hLow,
-      h_high: hHigh,
-      s_min: sMin,
-      v_min: vMin,
-      keep_largest: true,
-      bridge_gap: bridgeGap,
-      roi_y0: roiEnabled ? roiY[0] : null,
-      roi_y1: roiEnabled ? roiY[1] : null,
-    }),
-    [method, blueBoost, threshOffset, hLow, hHigh, sMin, vMin, bridgeGap, roiEnabled, roiY],
-  );
+  // 레이저 검출은 백엔드의 단일 강건 자동 검출기가 담당한다.
+  const detectionPayload = React.useCallback(() => ({}), []);
 
   const refreshCalibrations = React.useCallback(async () => {
     try {
@@ -68,10 +53,7 @@ export function useCmsWorkspace() {
     const w = res?.image_size?.width;
     const h = res?.image_size?.height;
     if (w) setImgWidth(w);
-    if (h) {
-      setImgHeight(h);
-      if (!roiEnabled) setRoiY([0, h]);
-    }
+    if (h) setImgHeight(h);
   };
 
   const run = async (fn, okMsg) => {
@@ -91,25 +73,35 @@ export function useCmsWorkspace() {
     }
   };
 
-  const handleCaptureDetect = async (okMsg = '캡처 & 검출 완료 (가장 긴 선만 자동 추출)') => {
+  const handleCaptureDetect = async (okMsg = '캡처 & 검출 완료', extra = {}) => {
     const res = await run(
-      () => detectLaser(cameraIdBackend, { calibration_file: calibFile || null, use_stored: false, ...detectionPayload() }),
+      () => detectLaser(cameraIdBackend, {
+        calibration_file: calibFile || null,
+        use_stored: false,
+        ...detectionPayload(),
+        ...extra,
+      }),
       okMsg,
     );
     if (res) {
-      setResultImage(res.image);
+      applyImages(res);
       setDetectInfo(res);
       applySize(res);
     }
   };
 
-  const handleRedetect = async () => {
+  const handleRedetect = async (extra = {}) => {
     const res = await run(
-      () => detectLaser(cameraIdBackend, { calibration_file: calibFile || null, use_stored: true, ...detectionPayload() }),
+      () => detectLaser(cameraIdBackend, {
+        calibration_file: calibFile || null,
+        use_stored: true,
+        ...detectionPayload(),
+        ...extra,
+      }),
       '재검출 완료 (같은 이미지)',
     );
     if (res) {
-      setResultImage(res.image);
+      applyImages(res);
       setDetectInfo(res);
       applySize(res);
     }
@@ -117,7 +109,7 @@ export function useCmsWorkspace() {
 
   const applyCaptureResult = (res) => {
     if (!res) return;
-    setResultImage(res.image);
+    applyImages(res);
     setDetectInfo(res);
     applySize(res);
   };
@@ -129,28 +121,13 @@ export function useCmsWorkspace() {
     calibrations,
     calibFile,
     setCalibFile,
-    method,
-    setMethod,
-    blueBoost,
-    setBlueBoost,
-    threshOffset,
-    setThreshOffset,
-    hLow,
-    setHLow,
-    hHigh,
-    setHHigh,
-    sMin,
-    setSMin,
-    vMin,
-    setVMin,
-    bridgeGap,
-    setBridgeGap,
-    roiEnabled,
-    setRoiEnabled,
-    roiY,
-    setRoiY,
     resultImage,
     setResultImage,
+    resultImageFull,
+    setResultImageFull,
+    resultCrop,
+    setResultCrop,
+    applyImages,
     imgWidth,
     imgHeight,
     detectInfo,
@@ -162,5 +139,6 @@ export function useCmsWorkspace() {
     handleRedetect,
     detectionPayload,
     applyCaptureResult,
+    refreshCalibrations,
   };
 }

@@ -1,5 +1,7 @@
 """
 체커보드 카메라 캘리브레이션 (Zhang's method / OpenCV calibrateCamera)
+
+고도화: Brown/Rational 왜곡 모델, outlier view 제거, Pass/Fail, 샘플 품질 가이드.
 """
 from __future__ import annotations
 
@@ -17,11 +19,227 @@ DEFAULT_INNER_COLS = 3
 DEFAULT_INNER_ROWS = 3
 DEFAULT_SQUARE_MM = 20.0
 MIN_SAMPLES = 8
+RECOMMENDED_SAMPLES = 12
+
+DISTORTION_MODELS = ("brown5", "rational")
+
+# Pass/Fail 기준 (px)
+RMS_PASS_PX = 0.35
+RMS_WARN_PX = 0.50
+MAX_VIEW_PASS_PX = 0.50
+FX_FY_RATIO_MIN = 0.98
+FX_FY_RATIO_MAX = 1.02
+MIN_BOARD_COVERAGE = 0.25
+OUTLIER_MAD_K = 2.5
 # 프리뷰: 단발 검출 실패 시 이전 코너 유지 (기본 300ms×12 ≈ 3.6초, 대형 패턴은 더 길게)
 PREVIEW_HOLD_FRAMES = 12
 LARGE_PATTERN_CORNER_COUNT = 16  # 4×4 inner 이상
-# 코너 검출·서브픽셀 정밀화용 해상도 상한 (캡처)
-CAPTURE_MAX_EDGE_PX = 4096
+# 샘플 캡처는 원본 좌표를 저장하되, 코너 "탐색"만 이 크기 이하로 축소해 속도를 확보한다.
+CAPTURE_DETECT_MAX_EDGE_PX = 1280
+
+
+def undistort_bgr(
+    image_bgr: np.ndarray,
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+    distortion_model: str = "brown5",
+) -> np.ndarray:
+    """캘리브 JSON meta의 distortion_model에 맞게 undistort (brown5 / rational)."""
+    _ = distortion_model  # rational도 동일 API, dist 계수 길이로 구분
+    return cv2.undistort(image_bgr, camera_matrix, dist_coeffs)
+
+
+def _calib_flags(distortion_model: str, fix_aspect_ratio: bool) -> int:
+    flags = cv2.CALIB_USE_INTRINSIC_GUESS
+    if distortion_model == "rational":
+        flags |= cv2.CALIB_RATIONAL_MODEL
+    if fix_aspect_ratio:
+        flags |= cv2.CALIB_FIX_ASPECT_RATIO
+    return flags
+
+
+def _initial_camera_matrix(image_size: Tuple[int, int]) -> np.ndarray:
+    """CALIB_USE_INTRINSIC_GUESS/FIX_ASPECT_RATIO용 초기 내부 파라미터."""
+    w, h = image_size
+    f = float(max(w, h))
+    return np.array(
+        [
+            [f, 0.0, w / 2.0],
+            [0.0, f, h / 2.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _flag_names(distortion_model: str, fix_aspect_ratio: bool) -> List[str]:
+    names = ["USE_INTRINSIC_GUESS"]
+    if distortion_model == "rational":
+        names.append("RATIONAL")
+    if fix_aspect_ratio:
+        names.append("FIX_ASPECT_RATIO")
+    return names
+
+
+def _solve_calibration(
+    object_points_list: List[np.ndarray],
+    image_points_list: List[np.ndarray],
+    image_size: Tuple[int, int],
+    distortion_model: str,
+    fix_aspect_ratio: bool,
+):
+    w, h = image_size
+    flags = _calib_flags(distortion_model, fix_aspect_ratio)
+    camera_matrix = _initial_camera_matrix((w, h))
+    return cv2.calibrateCamera(
+        object_points_list,
+        image_points_list,
+        (w, h),
+        camera_matrix,
+        None,
+        flags=flags,
+    )
+
+
+def _per_view_reproj_errors(
+    object_points_list: List[np.ndarray],
+    image_points_list: List[np.ndarray],
+    camera_matrix: np.ndarray,
+    dist_coeffs: np.ndarray,
+    rvecs,
+    tvecs,
+) -> List[float]:
+    errors = []
+    for i in range(len(object_points_list)):
+        proj, _ = cv2.projectPoints(
+            object_points_list[i],
+            rvecs[i],
+            tvecs[i],
+            camera_matrix,
+            dist_coeffs,
+        )
+        err = cv2.norm(image_points_list[i], proj, cv2.NORM_L2) / len(proj)
+        errors.append(float(err))
+    return errors
+
+
+def _outlier_indices(per_view_errors: List[float], min_keep: int) -> List[int]:
+    if len(per_view_errors) <= min_keep:
+        return []
+    arr = np.array(per_view_errors, dtype=np.float64)
+    med = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - med)))
+    sigma = max(mad * 1.4826, 0.02)
+    threshold = med + OUTLIER_MAD_K * sigma
+    outliers = [i for i, e in enumerate(per_view_errors) if e > threshold]
+    if len(per_view_errors) - len(outliers) < min_keep:
+        ranked = sorted(range(len(arr)), key=lambda i: arr[i], reverse=True)
+        allow_drop = len(per_view_errors) - min_keep
+        return ranked[:allow_drop]
+    return outliers
+
+
+def _analyze_sample_quality(
+    corners: np.ndarray,
+    image_size: Tuple[int, int],
+    pattern_size: Tuple[int, int],
+) -> dict:
+    w, h = image_size
+    cols, rows = pattern_size
+    pts = corners.reshape(-1, 2).astype(np.float64)
+    cx, cy = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+    zone_col = 0 if cx < w / 3 else (1 if cx < 2 * w / 3 else 2)
+    zone_row = 0 if cy < h / 3 else (1 if cy < 2 * h / 3 else 2)
+    zone = zone_row * 3 + zone_col
+
+    span_x = float(pts[:, 0].max() - pts[:, 0].min())
+    span_y = float(pts[:, 1].max() - pts[:, 1].min())
+    coverage = max(span_x / max(w, 1), span_y / max(h, 1))
+
+    grid = corners.reshape(rows, cols, 2)
+    v = grid[0, -1, :] - grid[0, 0, :]
+    tilt_deg = abs(float(np.degrees(np.arctan2(v[1], v[0]))))
+
+    warnings: List[str] = []
+    if coverage < MIN_BOARD_COVERAGE:
+        warnings.append("보드가 화면 대비 너무 작습니다 (40% 이상 권장)")
+    if tilt_deg < 5:
+        warnings.append("기울기가 작습니다 — 보드를 더 기울여 촬영하세요")
+    if zone == 4:
+        warnings.append("중앙만 반복됨 — 가장자리/모서리 포즈를 추가하세요")
+
+    return {
+        "zone": zone,
+        "coverage": round(coverage, 3),
+        "tilt_deg": round(tilt_deg, 1),
+        "center_px": {"x": round(cx, 1), "y": round(cy, 1)},
+        "warnings": warnings,
+    }
+
+
+def _pose_coverage(sample_qualities: List[dict]) -> dict:
+    zones = {q["zone"] for q in sample_qualities if q.get("zone") is not None}
+    return {
+        "zones_covered": len(zones),
+        "zones_total": 9,
+        "ratio": round(len(zones) / 9.0, 2),
+        "missing_hint": "9구역 중 " + str(len(zones)) + "/9 커버",
+    }
+
+
+def _assess_quality(
+    rms_error: float,
+    per_view_errors: List[float],
+    camera_matrix: np.ndarray,
+    sample_count: int,
+    pose_cov: dict,
+    excluded_indices: List[int],
+) -> dict:
+    fx, fy = float(camera_matrix[0, 0]), float(camera_matrix[1, 1])
+    fx_fy_ratio = fx / fy if fy else 1.0
+    max_view = max(per_view_errors) if per_view_errors else 999.0
+
+    issues: List[str] = []
+    level = "pass"
+
+    if rms_error > RMS_WARN_PX:
+        issues.append(f"RMS {rms_error:.3f}px > {RMS_WARN_PX}px")
+        level = "fail"
+    elif rms_error > RMS_PASS_PX:
+        issues.append(f"RMS {rms_error:.3f}px > 권장 {RMS_PASS_PX}px")
+        if level == "pass":
+            level = "warn"
+
+    if max_view > MAX_VIEW_PASS_PX:
+        issues.append(f"최대 뷰 오차 {max_view:.3f}px > {MAX_VIEW_PASS_PX}px")
+        level = "fail"
+
+    if not (FX_FY_RATIO_MIN <= fx_fy_ratio <= FX_FY_RATIO_MAX):
+        issues.append(f"fx/fy={fx_fy_ratio:.4f} (권장 {FX_FY_RATIO_MIN}~{FX_FY_RATIO_MAX})")
+        if level == "pass":
+            level = "warn"
+
+    if sample_count < RECOMMENDED_SAMPLES:
+        issues.append(f"샘플 {sample_count}장 (권장 {RECOMMENDED_SAMPLES}+)")
+        if level == "pass":
+            level = "warn"
+
+    if pose_cov.get("zones_covered", 0) < 5:
+        issues.append(f"포즈 다양성 부족 ({pose_cov.get('missing_hint', '')})")
+        if level == "pass":
+            level = "warn"
+
+    return {
+        "pass": level == "pass",
+        "level": level,
+        "rms_px": round(float(rms_error), 4),
+        "max_per_view_px": round(float(max_view), 4),
+        "fx_fy_ratio": round(fx_fy_ratio, 4),
+        "excluded_samples": excluded_indices,
+        "excluded_count": len(excluded_indices),
+        "pose_coverage": pose_cov,
+        "issues": issues,
+    }
 
 
 @dataclass
@@ -29,6 +247,8 @@ class CalibrationConfig:
     inner_cols: int = DEFAULT_INNER_COLS
     inner_rows: int = DEFAULT_INNER_ROWS
     square_size_mm: float = DEFAULT_SQUARE_MM
+    distortion_model: str = "brown5"
+    fix_aspect_ratio: bool = True
 
 
 @dataclass
@@ -44,6 +264,10 @@ class CalibrationSession:
     dist_coeffs: Optional[np.ndarray] = None
     rms_error: Optional[float] = None
     per_view_errors: List[float] = field(default_factory=list)
+    excluded_sample_indices: List[int] = field(default_factory=list)
+    quality_report: Optional[dict] = None
+    calib_flags: List[str] = field(default_factory=list)
+    _sample_qualities: List[dict] = field(default_factory=list, repr=False)
     _object_points_list: List[np.ndarray] = field(default_factory=list, repr=False)
     _image_points_list: List[np.ndarray] = field(default_factory=list, repr=False)
     _preview_miss_count: int = field(default=0, repr=False)
@@ -137,6 +361,21 @@ class CalibrationSession:
             gray, corners.astype(np.float32), win, (-1, -1), criteria
         )
 
+    @staticmethod
+    def _resize_gray_for_detection(gray: np.ndarray, max_edge_px: int) -> Tuple[np.ndarray, float]:
+        """검출용 축소 gray와 원본/축소 배율을 반환."""
+        h, w = gray.shape[:2]
+        max_edge = max(w, h)
+        if max_edge_px <= 0 or max_edge <= max_edge_px:
+            return gray, 1.0
+        scale = float(max_edge_px) / float(max_edge)
+        resized = cv2.resize(
+            gray,
+            (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+        return resized, scale
+
     def _try_sb(
         self, image: np.ndarray
     ) -> Tuple[bool, Optional[np.ndarray], bool, str]:
@@ -208,12 +447,32 @@ class CalibrationSession:
     def reset_samples(self):
         self._object_points_list.clear()
         self._image_points_list.clear()
+        self._sample_qualities.clear()
         self.sample_count = 0
         self.camera_matrix = None
         self.dist_coeffs = None
         self.rms_error = None
         self.per_view_errors.clear()
+        self.excluded_sample_indices.clear()
+        self.quality_report = None
+        self.calib_flags.clear()
         self.image_size = None
+
+    def quality_guide(self) -> dict:
+        pose = _pose_coverage(self._sample_qualities)
+        last_warnings = (
+            self._sample_qualities[-1].get("warnings", [])
+            if self._sample_qualities
+            else []
+        )
+        return {
+            "sample_count": self.sample_count,
+            "min_samples": MIN_SAMPLES,
+            "recommended_samples": RECOMMENDED_SAMPLES,
+            "pose_coverage": pose,
+            "last_sample_warnings": last_warnings,
+            "distortion_model": self.config.distortion_model,
+        }
 
     def _smooth_preview_corners(
         self, corners: np.ndarray, alpha: float = 0.35
@@ -289,20 +548,33 @@ class CalibrationSession:
     def detect_corners_for_capture(
         self, image_bgr: np.ndarray
     ) -> Tuple[bool, Optional[np.ndarray]]:
-        """샘플 캡처용 — 프리뷰 보간 없이 현재 프레임에서만 검출."""
+        """샘플 캡처용 — 축소본에서 탐색 후 코너 좌표는 원본 해상도로 저장."""
         gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-        found, corners, needs_subpix, method = self._find_chessboard_corners(gray)
+        detect_gray, scale = self._resize_gray_for_detection(gray, CAPTURE_DETECT_MAX_EDGE_PX)
+        found, corners, needs_subpix, method = self._find_chessboard_corners(detect_gray)
         if not found or corners is None:
             return False, None
 
         if needs_subpix:
-            corners = self._refine_corners(gray, corners)
+            corners = self._refine_corners(detect_gray, corners)
+
+        if scale != 1.0:
+            corners = (corners.astype(np.float32) / float(scale)).astype(np.float32)
+            # 원본 전체에서 다시 찾는 것이 아니라, 축소 검출 위치 주변만 국소 보정한다.
+            try:
+                corners = self._refine_corners(gray, corners)
+            except cv2.error:
+                pass
 
         self._preview_miss_count = 0
         self._last_preview_corners = corners.copy()
-        self.last_detection_method = method
+        self.last_detection_method = (
+            f"{method} @detect {detect_gray.shape[1]}x{detect_gray.shape[0]}"
+            if scale != 1.0
+            else method
+        )
         self.last_detected = True
-        self.last_message = f"체커보드 검출됨 ({method})"
+        self.last_message = f"체커보드 검출됨 ({self.last_detection_method})"
         return True, corners
 
     def preview_overlay(self, image_bgr: np.ndarray) -> Tuple[np.ndarray, dict]:
@@ -319,6 +591,11 @@ class CalibrationSession:
             "detection_method": self.last_detection_method,
             "rms_error": self.rms_error,
             "calibrated": self.camera_matrix is not None,
+            "quality_guide": self.quality_guide(),
+            "quality_report": self.quality_report,
+            "excluded_sample_indices": self.excluded_sample_indices,
+            "distortion_model": self.config.distortion_model,
+            "calib_flags": self.calib_flags,
         }
         status = (
             f"Samples: {self.sample_count}/{MIN_SAMPLES}+ | "
@@ -367,13 +644,22 @@ class CalibrationSession:
                 "sample_count": self.sample_count,
             }
 
+        quality = _analyze_sample_quality(corners, (w, h), self.pattern_size)
         self._object_points_list.append(self._object_template())
         self._image_points_list.append(corners)
+        self._sample_qualities.append(quality)
         self.sample_count += 1
+        self.quality_report = None
+        self.excluded_sample_indices.clear()
+        msg = f"샘플 {self.sample_count}장 추가됨"
+        if quality.get("warnings"):
+            msg += " — " + quality["warnings"][0]
         return {
             "success": True,
-            "message": f"샘플 {self.sample_count}장 추가됨",
+            "message": msg,
             "sample_count": self.sample_count,
+            "sample_quality": quality,
+            "quality_guide": self.quality_guide(),
         }
 
     def run_calibration(self) -> dict:
@@ -385,49 +671,88 @@ class CalibrationSession:
         if self.image_size is None:
             return {"success": False, "message": "이미지 크기 정보가 없습니다"}
 
+        model = self.config.distortion_model
+        if model not in DISTORTION_MODELS:
+            return {"success": False, "message": f"지원하지 않는 왜곡 모델: {model}"}
+
         w, h = self.image_size
-        rms, camera_matrix, dist_coeffs, _rvecs, _tvecs = cv2.calibrateCamera(
-            self._object_points_list,
-            self._image_points_list,
-            (w, h),
-            None,
-            None,
+        self.calib_flags = _flag_names(model, self.config.fix_aspect_ratio)
+
+        obj_all = self._object_points_list
+        img_all = self._image_points_list
+
+        rms, camera_matrix, dist_coeffs, rvecs, tvecs = _solve_calibration(
+            obj_all, img_all, (w, h), model, self.config.fix_aspect_ratio
         )
+        per_view = _per_view_reproj_errors(obj_all, img_all, camera_matrix, dist_coeffs, rvecs, tvecs)
+        all_per_view = list(per_view)
+        excluded = _outlier_indices(per_view, MIN_SAMPLES)
+
+        if excluded:
+            keep = [i for i in range(len(obj_all)) if i not in excluded]
+            obj_kept = [obj_all[i] for i in keep]
+            img_kept = [img_all[i] for i in keep]
+            rms, camera_matrix, dist_coeffs, rvecs, tvecs = _solve_calibration(
+                obj_kept, img_kept, (w, h), model, self.config.fix_aspect_ratio
+            )
+            per_view = _per_view_reproj_errors(
+                obj_kept, img_kept, camera_matrix, dist_coeffs, rvecs, tvecs
+            )
+            excluded_map = excluded
+        else:
+            excluded_map = []
+            all_per_view = list(per_view)
 
         self.camera_matrix = camera_matrix
         self.dist_coeffs = dist_coeffs
         self.rms_error = float(rms)
+        self.per_view_errors = per_view
+        self.excluded_sample_indices = excluded_map
 
-        self.per_view_errors = []
-        for i in range(len(self._object_points_list)):
-            proj, _ = cv2.projectPoints(
-                self._object_points_list[i],
-                _rvecs[i],
-                _tvecs[i],
-                camera_matrix,
-                dist_coeffs,
-            )
-            err = cv2.norm(self._image_points_list[i], proj, cv2.NORM_L2) / len(proj)
-            self.per_view_errors.append(float(err))
+        pose_cov = _pose_coverage(self._sample_qualities)
+        self.quality_report = _assess_quality(
+            self.rms_error,
+            self.per_view_errors,
+            camera_matrix,
+            self.sample_count,
+            pose_cov,
+            excluded_map,
+        )
 
         fx, fy = camera_matrix[0, 0], camera_matrix[1, 1]
         cx, cy = camera_matrix[0, 2], camera_matrix[1, 2]
+        q = self.quality_report
+        level = q.get("level", "pass")
+        msg = f"캘리브레이션 완료 (Zhang / {model}) — {level.upper()}"
+        if excluded_map:
+            msg += f" | outlier {len(excluded_map)}장 제외"
+
         return {
             "success": True,
-            "message": "캘리브레이션 완료 (Zhang's method)",
+            "message": msg,
             "rms_error": self.rms_error,
             "per_view_errors": self.per_view_errors,
+            "all_per_view_errors": all_per_view,
+            "excluded_sample_indices": excluded_map,
             "camera_matrix": camera_matrix.tolist(),
             "dist_coeffs": dist_coeffs.reshape(-1).tolist(),
             "focal_length_px": {"fx": float(fx), "fy": float(fy)},
             "principal_point_px": {"cx": float(cx), "cy": float(cy)},
             "image_size": {"width": w, "height": h},
             "sample_count": self.sample_count,
+            "distortion_model": model,
+            "calib_flags": self.calib_flags,
+            "quality_report": self.quality_report,
+            "quality_guide": self.quality_guide(),
         }
 
-    def save(self, base_dir: str) -> str:
+    def save(self, base_dir: str, force: bool = False) -> str:
         if self.camera_matrix is None or self.dist_coeffs is None:
             raise ValueError("캘리브레이션 결과가 없습니다")
+        if self.quality_report and not self.quality_report.get("pass") and not force:
+            raise ValueError(
+                "품질 검증 FAIL/WARN — 저장하려면 force=true 또는 UI에서 강제 저장을 선택하세요"
+            )
 
         os.makedirs(base_dir, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -444,20 +769,26 @@ class CalibrationSession:
             pattern_rows=self.config.inner_rows,
             square_size_mm=self.config.square_size_mm,
             rms_error=self.rms_error,
+            distortion_model=self.config.distortion_model,
         )
 
         meta = {
             "camera_id": self.camera_id,
             "ui_camera_id": self.camera_id + 1,
             "method": "Zhang (OpenCV calibrateCamera)",
+            "distortion_model": self.config.distortion_model,
+            "calib_flags": self.calib_flags,
+            "fix_aspect_ratio": self.config.fix_aspect_ratio,
             "pattern_inner_corners": list(self.pattern_size),
             "square_size_mm": self.config.square_size_mm,
             "sample_count": self.sample_count,
             "rms_error": self.rms_error,
             "per_view_errors": self.per_view_errors,
+            "excluded_sample_indices": self.excluded_sample_indices,
             "camera_matrix": self.camera_matrix.tolist(),
             "dist_coeffs": self.dist_coeffs.reshape(-1).tolist(),
             "image_size": {"width": self.image_size[0], "height": self.image_size[1]},
+            "quality": self.quality_report,
             "saved_at": stamp,
             "npz_path": npz_path,
         }
