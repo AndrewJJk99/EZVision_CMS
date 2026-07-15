@@ -625,18 +625,36 @@ def _summarize_detection_quality(quality: dict, width: int, valid_after: int) ->
     }
 
 
-def _robust_blue_response(undistorted_bgr: np.ndarray) -> np.ndarray:
-    """파란색 우세도와 수직 top-hat을 결합한 얇은 수평 레이저 응답."""
+def _robust_laser_response(
+    undistorted_bgr: np.ndarray, laser_color: str = "blue"
+) -> np.ndarray:
+    """레이저 색 우세도와 수직 top-hat을 결합한 얇은 수평 레이저 응답.
+
+    laser_color="blue"|"red". 파란/빨간 레이저 모두 중심이 흰색으로 포화되므로
+    색 채널만 교체하면 동일 파이프라인으로 검출된다.
+    """
+    color = (laser_color or "blue").lower()
     bgr = undistorted_bgr.astype(np.float32)
     b, g, r = cv2.split(bgr)
 
-    # 넓은 파란 물체 자체가 응답이 되지 않도록 색상 성분에도 수직 top-hat을 적용한다.
-    chroma = np.maximum(b - 0.5 * (g + r), 0.0)
-    dominance = np.maximum(b - np.maximum(g, r), 0.0)
+    if color == "red":
+        main = r                       # 레이저 우세 채널
+        other = 0.5 * (g + b)
+        other_max = np.maximum(g, b)
+        main8 = undistorted_bgr[:, :, 2]
+    else:
+        main = b
+        other = 0.5 * (g + r)
+        other_max = np.maximum(g, r)
+        main8 = undistorted_bgr[:, :, 0]
 
-    # 흰색으로 포화된 레이저 중심은 chroma가 약하므로 주변보다 밝은 얇은 띠도 사용한다.
-    b8 = undistorted_bgr[:, :, 0]
-    kernel_h = max(15, (undistorted_bgr.shape[0] // 120) | 1)
+    # 넓은 유색 물체 자체가 응답이 되지 않도록 색상 성분에도 수직 top-hat을 적용한다.
+    chroma = np.maximum(main - other, 0.0)
+    dominance = np.maximum(main - other_max, 0.0)
+
+    # 커널이 레이저 두께(bloom 포함, 포화 시 ~190px 실측)보다 작으면
+    # top-hat 응답이 0이 되어 두꺼운 레이저가 통째로 사라진다.
+    kernel_h = max(151, (undistorted_bgr.shape[0] // 20) | 1)
     vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_h))
     chroma_line = cv2.morphologyEx(
         np.clip(chroma, 0, 255).astype(np.uint8), cv2.MORPH_TOPHAT, vertical_kernel
@@ -645,12 +663,23 @@ def _robust_blue_response(undistorted_bgr: np.ndarray) -> np.ndarray:
         np.clip(dominance, 0, 255).astype(np.uint8), cv2.MORPH_TOPHAT, vertical_kernel
     ).astype(np.float32)
     local_line = cv2.morphologyEx(
-        b8, cv2.MORPH_TOPHAT, vertical_kernel
+        main8, cv2.MORPH_TOPHAT, vertical_kernel
     ).astype(np.float32)
 
     response = 0.55 * chroma_line + 0.25 * dominance_line + 0.40 * local_line
-    response *= np.clip((b - 8.0) / 64.0, 0.0, 1.0)
+    response *= np.clip((main - 8.0) / 64.0, 0.0, 1.0)
+
+    # 포화 코어(우세채널>=250)는 top-hat과 무관하게 직접 응답 — 커널보다 두꺼워진
+    # 포화 레이저도 놓치지 않는다 (덩어리 오검출은 컴포넌트 필터가 방어).
+    sat = (main8 >= 250).astype(np.float32) * 255.0
+    response = np.maximum(response, sat)
+
     return cv2.GaussianBlur(response, (1, 3), 0)
+
+
+def _robust_blue_response(undistorted_bgr: np.ndarray) -> np.ndarray:
+    """하위호환 래퍼 — 파란 레이저 응답."""
+    return _robust_laser_response(undistorted_bgr, "blue")
 
 
 def _automatic_response_mask(response: np.ndarray) -> Tuple[np.ndarray, float]:
@@ -700,7 +729,7 @@ def _keep_line_like_components(
     num, labels, stats, _ = cv2.connectedComponentsWithStats(bridged, 8)
     keep = np.zeros_like(mask)
     min_width = max(40, int(round(w * 0.02)))
-    max_height = max(60, int(h * 0.06))  # bloom 포함 허용
+    max_height = max(60, int(h * 0.12))  # bloom 포함 허용 (포화 레이저 bloom ~220px 실측)
     guide = intensity if intensity is not None else response
     candidates = []
 
@@ -710,10 +739,16 @@ def _keep_line_like_components(
             continue
         if y >= int(h * 0.978):
             continue
-        # 선형성: 가로가 세로보다 충분히 길어야 함 (반사 덩어리 제거)
-        if cw < ch * 3:
+        # 선형성: bbox 높이 대신 '컬럼별 두께 중앙값'으로 판정.
+        # 박스 코너의 국소 세로 flare가 bbox 높이를 부풀려 진짜 레이저가
+        # 통째로 기각되던 문제를 막는다(반사 덩어리는 두께 중앙값도 커서 여전히 기각).
+        comp = labels[y:y + ch, x:x + cw] == i
+        col_counts = comp.sum(axis=0)
+        col_counts = col_counts[col_counts > 0]
+        med_h = float(np.median(col_counts)) if col_counts.size else float(ch)
+        if cw < med_h * 3:
             continue
-        if ch > max_height:
+        if med_h > max_height:
             continue
         pixels = guide[labels == i]
         strength = float(np.median(pixels)) if pixels.size else 0.0
@@ -748,14 +783,14 @@ def _keep_line_like_components(
 
 
 def _bright_band_center(
-    col: np.ndarray, anchor: int, max_span: int = 60
+    col: np.ndarray, anchor: int, max_span: int = 150
 ) -> Tuple[float, float, float]:
     """기준점 주변에서 '연속된 밝은 띠 전체'의 중점을 서브픽셀로 계산.
 
-    파란 가장자리 + 흰색 과포화 코어를 하나의 두꺼운 띠로 보고, 그 띠의 위·아래
-    가장자리를 임계 교차로 구해 정중앙을 반환한다(= 굵은 레이저의 중간값).
-    임계값은 밝은 정도(포화 레벨)에 맞춰 배경보다는 위, 파란 가장자리는 포함되게
-    잡는다.
+    흰색 과포화 코어를 밝은 띠로 보고, 그 띠의 위·아래 가장자리를 임계 교차로
+    구해 정중앙을 반환한다(= 굵은 레이저의 중간값). 임계를 피크의 75%로 잡아
+    코어보다 어두운 파란 bloom(글로우)은 제외한다 — bloom이 위아래 비대칭이라
+    낮은 임계에서는 중심이 bloom 쪽으로 출렁였다.
     """
     n = col.size
     if n == 0:
@@ -766,8 +801,8 @@ def _bright_band_center(
     peak = float(np.max(col[w0:w1]))
     if peak <= 0:
         return np.nan, 0.0, 0.0
-    # 파란 가장자리(포화 ~255)는 포함하고 배경은 제외하는 임계
-    thr = max(0.45 * peak, 90.0)
+    # 포화 코어는 포함하고 bloom·배경은 제외하는 임계
+    thr = max(0.75 * peak, 90.0)
     # 기준점이 어두우면 창 내 최대 밝기 위치로 스냅
     if col[a] < thr:
         a = w0 + int(np.argmax(col[w0:w1]))
@@ -986,17 +1021,19 @@ def detect_laser_profile(
     roi_y1: Optional[int] = None,
     preserve_gaps: bool = False,
     return_quality: bool = False,
+    laser_color: str = "blue",
     **_legacy_options,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """단일 강건 자동 검출기.
 
-    색상 임계값이나 SNR을 사용자가 조절하지 않는다. 파란 선형 응답을 자동
-    임계화하고, 수평으로 충분히 긴 연결요소만 프로파일로 변환한다.
+    색상 임계값이나 SNR을 사용자가 조절하지 않는다. laser_color("blue"|"red")에
+    맞는 선형 응답을 자동 임계화하고, 수평으로 충분히 긴 연결요소만 프로파일로 변환한다.
     """
     if undistorted_bgr is None or undistorted_bgr.size == 0:
         raise ValueError("레이저 검출 이미지가 없습니다")
 
-    response = _robust_blue_response(undistorted_bgr)
+    color = (laser_color or "blue").lower()
+    response = _robust_laser_response(undistorted_bgr, color)
     h, w = response.shape
     if roi_y0 is not None or roi_y1 is not None:
         y0 = 0 if roi_y0 is None else max(0, min(int(roi_y0), h))
@@ -1007,12 +1044,13 @@ def detect_laser_profile(
         response = roi
 
     raw_mask, threshold = _automatic_response_mask(response)
-    # 서브픽셀 추출은 원본 밝기 코어를 사용한다. 굵은 파란 코어의 '중간값'은
-    # 임계 교차 중점으로 계산한다.
+    # 서브픽셀 추출은 원본 밝기 코어를 사용한다. 굵은 코어의 '중간값'은
+    # 임계 교차 중점으로 계산한다. 우세 채널은 레이저 색을 따른다.
     b = undistorted_bgr[:, :, 0].astype(np.float64)
     g = undistorted_bgr[:, :, 1].astype(np.float64)
     r = undistorted_bgr[:, :, 2].astype(np.float64)
-    intensity = np.maximum(b, 0.5 * (b + g + r))
+    main_ch = r if color == "red" else b
+    intensity = np.maximum(main_ch, 0.5 * (b + g + r))
     mask, component_count = _keep_line_like_components(raw_mask, response, intensity=intensity)
     profile, strengths, widths = _extract_subpixel_profile(intensity, mask)
     profile = _clean_profile_without_breaking_steps(
@@ -1027,7 +1065,8 @@ def detect_laser_profile(
     if return_quality:
         valid = int(np.count_nonzero(~np.isnan(profile)))
         quality = {
-            "detector": "robust_blue_ridge_v2",
+            "detector": f"robust_{color}_ridge_v2",
+            "laser_color": color,
             "coverage": round(valid / max(1, w), 3),
             "valid_after_continuity": valid,
             "line_components": int(component_count),
@@ -1920,6 +1959,62 @@ def _facing_dy(left: dict, right: dict, n: int = 8) -> float:
     return abs(ry - ly)
 
 
+def _column_peak(intensity: np.ndarray, profile: np.ndarray, x: int, half: int = 25) -> float:
+    """컬럼 x에서 프로파일 y 주변의 피크 밝기."""
+    y = profile[int(x)]
+    if np.isnan(y):
+        return 0.0
+    y = int(round(y))
+    y0 = max(0, y - half)
+    y1 = min(intensity.shape[0], y + half + 1)
+    return float(intensity[y0:y1, int(x)].max())
+
+
+def _bright_endpoint(
+    intensity: np.ndarray,
+    profile: np.ndarray,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    side: str,
+    ratio: float = 0.8,
+    floor: float = 300.0,
+    n: int = 9,
+) -> Optional[dict]:
+    """밝은 코어 기준 끝점: 세그먼트 중앙부 피크의 ratio 이상인 마지막 컬럼.
+
+    레이저 끝에서 코너를 감싸는 어두운 글로우 꼬리를 제외해, 양쪽 끝점을
+    '가장 밝은 코어가 끝나는 곳'이라는 동일 기준으로 확정한다.
+    """
+    if xs is None or len(xs) < 8:
+        return None
+    xi = xs.astype(int)
+    # 기준 밝기: 세그먼트 중앙 50% 컬럼들의 피크 중앙값 (샘플링으로 상한 200개)
+    mid = xi[len(xi) // 4: max(len(xi) // 4 + 1, 3 * len(xi) // 4)]
+    step = max(1, len(mid) // 200)
+    ref = float(np.median([_column_peak(intensity, profile, x) for x in mid[::step]]))
+    thr = max(floor, ratio * ref)
+
+    order = xi[::-1] if side == "right" else xi  # 끝에서 안쪽으로
+    ex = None
+    for x in order:
+        if _column_peak(intensity, profile, x) >= thr:
+            ex = int(x)
+            break
+    if ex is None:
+        return None
+    sel = int(np.flatnonzero(xi == ex)[0])
+    if side == "right":
+        ys_n = ys[max(0, sel - n + 1): sel + 1]
+    else:
+        ys_n = ys[sel: sel + n]
+    return {
+        "x": round(float(ex), 3),
+        "y": round(float(np.median(ys_n)), 3),
+        "ref_peak": round(ref, 1),
+        "threshold": round(thr, 1),
+    }
+
+
 def measure_gap_from_profile(
     profile: np.ndarray,
     min_segment_px: int = DEFAULT_GAP_MIN_SEGMENT_PX,
@@ -1931,6 +2026,9 @@ def measure_gap_from_profile(
     search_x0: Optional[int] = None,
     search_x1: Optional[int] = None,
     min_step_dy_px: Optional[float] = None,
+    intensity: Optional[np.ndarray] = None,
+    bright_ratio: float = 0.8,
+    bright_floor: float = 300.0,
 ) -> Tuple[Optional[dict], Optional[str]]:
     """레이저 직선 끝점 사이 간격을 측정.
 
@@ -1940,6 +2038,8 @@ def measure_gap_from_profile(
 
     min_step_dy_px가 주어지면 마주보는 끝쪽 y 차이가 그 이상인
     '다른 단' 세그먼트 쌍만 후보로 삼는다.
+    intensity(원본 밝기 맵)가 주어지면 '밝은 코어 기준 끝점'도 함께 확정해
+    gap_bright_px/mm를 계산한다 — 글로우 꼬리를 제외한 값으로, 권장 측정값.
     """
     if profile is None or len(profile) < 10:
         return None, "레이저 프로파일이 없습니다"
@@ -1964,30 +2064,46 @@ def measure_gap_from_profile(
     step_dy_ref = 3.0
 
     candidates = []
-    for i in range(len(segs) - 1):
-        left, right = segs[i], segs[i + 1]
-        gap_x0 = float(left["x1"])
-        gap_x1 = float(right["x0"])
-        gap_w = gap_x1 - gap_x0
-        step_dy = _facing_dy(left, right)
-        if min_step_dy_px is not None and step_dy < float(min_step_dy_px):
-            continue
-        # 다른 단 쌍은 x 간격이 거의 없어도(순수 y 점프) 후보로 허용
-        gap_floor = 0.0 if step_dy >= step_dy_ref else float(min_gap_px)
-        if gap_w < gap_floor or gap_w > float(max_gap_px):
-            continue
-        mid = 0.5 * (gap_x0 + gap_x1)
-        if mid < x0s or mid > x1s:
-            continue
-        # 점수: 양쪽이 길고, 간격이 너무 크지 않으며, 화면 중앙에 가까울수록 가산
-        len_score = min(left["length_px"], right["length_px"])
-        center_pen = abs(mid - cx) / max(cx, 1.0)
-        # 차량 갭 ~수~수십 px 가정: 중간 폭 선호
-        width_score = 1.0 / (1.0 + abs(gap_w - 20.0) / 30.0)
-        # 단차 보너스: 다른 단(끝쪽 y 차이가 큰) 쌍을 같은 높이 끊김보다 우선 (최대 2배)
-        step_bonus = 1.0 + min(step_dy, 30.0) / 30.0
-        score = len_score * width_score * (1.0 - 0.35 * center_pen) * step_bonus
-        candidates.append((score, i, left, right, gap_w))
+    n_seg = len(segs)
+    for i in range(n_seg - 1):
+        left = segs[i]
+        # 사이의 '간격 바닥' 조각(양쪽 면보다 깊고 짧은 세그먼트)은 건너뛰어
+        # 두 물체 면끼리 짝지을 수 있게 한다 (최대 2개까지 건너뜀).
+        for j in range(i + 1, min(i + 4, n_seg)):
+            right = segs[j]
+            mids = segs[i + 1: j]
+            if mids:
+                ly = float(np.median(left["ys"][-8:]))
+                ry = float(np.median(right["ys"][:8]))
+                floor_y = max(ly, ry) + 20.0  # 이미지 y는 아래로 증가 → 더 깊은 곳
+                min_len = min(left["length_px"], right["length_px"])
+                if not all(
+                    m["mean_y"] > floor_y and m["length_px"] < 0.5 * min_len
+                    for m in mids
+                ):
+                    continue
+            gap_x0 = float(left["x1"])
+            gap_x1 = float(right["x0"])
+            gap_w = gap_x1 - gap_x0
+            step_dy = _facing_dy(left, right)
+            if min_step_dy_px is not None and step_dy < float(min_step_dy_px):
+                continue
+            # 다른 단 쌍은 x 간격이 거의 없어도(순수 y 점프) 후보로 허용
+            gap_floor = 0.0 if step_dy >= step_dy_ref else float(min_gap_px)
+            if gap_w < gap_floor or gap_w > float(max_gap_px):
+                continue
+            mid = 0.5 * (gap_x0 + gap_x1)
+            if mid < x0s or mid > x1s:
+                continue
+            # 점수: 양쪽이 길고, 간격이 너무 크지 않으며, 화면 중앙에 가까울수록 가산
+            len_score = min(left["length_px"], right["length_px"])
+            center_pen = abs(mid - cx) / max(cx, 1.0)
+            # 차량 갭 ~수~수십 px 가정: 중간 폭 선호
+            width_score = 1.0 / (1.0 + abs(gap_w - 20.0) / 30.0)
+            # 단차 보너스: 다른 단(끝쪽 y 차이가 큰) 쌍을 같은 높이 끊김보다 우선 (최대 2배)
+            step_bonus = 1.0 + min(step_dy, 30.0) / 30.0
+            score = len_score * width_score * (1.0 - 0.35 * center_pen) * step_bonus
+            candidates.append((score, i, left, right, gap_w))
 
     if not candidates:
         return None, "유효한 간격 후보가 없습니다 (min/max gap 또는 검색 구간 확인)"
@@ -2005,12 +2121,28 @@ def measure_gap_from_profile(
     gap_px = abs(dx)
     gap_euclid_px = float(np.hypot(dx, dy))
 
+    # 밝은 코어 기준 끝점 (글로우 꼬리 제외) — intensity가 있을 때만
+    left_bright = right_bright = None
+    gap_bright_px = None
+    if intensity is not None:
+        left_bright = _bright_endpoint(
+            intensity, profile, left["xs"], left["ys"], "right", bright_ratio, bright_floor
+        )
+        right_bright = _bright_endpoint(
+            intensity, profile, right["xs"], right["ys"], "left", bright_ratio, bright_floor
+        )
+        if left_bright and right_bright:
+            gap_bright_px = abs(float(right_bright["x"] - left_bright["x"]))
+
     gap_mm = None
     gap_euclid_mm = None
+    gap_bright_mm = None
     scale = None if mm_per_px is None else float(mm_per_px)
     if scale is not None and scale > 0:
         gap_mm = round(gap_px * scale, 4)
         gap_euclid_mm = round(gap_euclid_px * scale, 4)
+        if gap_bright_px is not None:
+            gap_bright_mm = round(gap_bright_px * scale, 4)
 
     # 응답용 세그먼트 요약 (대용량 xs/ys 제외)
     def _summ(s: dict) -> dict:
@@ -2027,10 +2159,14 @@ def measure_gap_from_profile(
         "gap_euclid_px": round(gap_euclid_px, 3),
         "gap_mm": gap_mm,
         "gap_euclid_mm": gap_euclid_mm,
+        "gap_bright_px": None if gap_bright_px is None else round(gap_bright_px, 3),
+        "gap_bright_mm": gap_bright_mm,
         "mm_per_px": scale,
         "step_dy_px": round(abs(dy), 3),
         "left_end": left_end,
         "right_end": right_end,
+        "left_end_bright": left_bright,
+        "right_end_bright": right_bright,
         "left_segment": _summ(left),
         "right_segment": _summ(right),
         "segment_count": len(segs),
@@ -2065,6 +2201,9 @@ def measure_gap_from_rois(
     b_roi: dict,
     fit_len: int = DEFAULT_GAP_FIT_LEN,
     mm_per_px: Optional[float] = None,
+    intensity: Optional[np.ndarray] = None,
+    bright_ratio: float = 0.8,
+    bright_floor: float = 300.0,
 ) -> Tuple[Optional[dict], Optional[str]]:
     """A/B ROI 안 레이저의 마주보는 끝점 사이 간격.
 
@@ -2107,12 +2246,28 @@ def measure_gap_from_rois(
     gap_px = abs(dx)
     gap_euclid_px = float(np.hypot(dx, dy))
 
+    # 밝은 코어 기준 끝점 (글로우 꼬리 제외)
+    left_bright = right_bright = None
+    gap_bright_px = None
+    if intensity is not None:
+        left_bright = _bright_endpoint(
+            intensity, profile, left_xs, left_ys, "right", bright_ratio, bright_floor
+        )
+        right_bright = _bright_endpoint(
+            intensity, profile, right_xs, right_ys, "left", bright_ratio, bright_floor
+        )
+        if left_bright and right_bright:
+            gap_bright_px = abs(float(right_bright["x"] - left_bright["x"]))
+
     gap_mm = None
     gap_euclid_mm = None
+    gap_bright_mm = None
     scale = None if mm_per_px is None else float(mm_per_px)
     if scale is not None and scale > 0:
         gap_mm = round(gap_px * scale, 4)
         gap_euclid_mm = round(gap_euclid_px * scale, 4)
+        if gap_bright_px is not None:
+            gap_bright_mm = round(gap_bright_px * scale, 4)
 
     def _seg(xs, ys, roi, label):
         return {
@@ -2135,9 +2290,13 @@ def measure_gap_from_rois(
         "gap_euclid_px": round(gap_euclid_px, 3),
         "gap_mm": gap_mm,
         "gap_euclid_mm": gap_euclid_mm,
+        "gap_bright_px": None if gap_bright_px is None else round(gap_bright_px, 3),
+        "gap_bright_mm": gap_bright_mm,
         "mm_per_px": scale,
         "left_end": left_end,
         "right_end": right_end,
+        "left_end_bright": left_bright,
+        "right_end_bright": right_bright,
         "left_segment": _seg(left_xs, left_ys, left_roi, left_label),
         "right_segment": _seg(right_xs, right_ys, right_roi, right_label),
         "segment_count": 2,
@@ -2286,20 +2445,48 @@ def draw_gap_overlay(
     except Exception:
         return out
 
+    h = out.shape[0]
     cv2.circle(out, (x0, y0), 6, (0, 255, 0), 2)
     cv2.circle(out, (x1, y1), 6, (0, 0, 255), 2)
-    cv2.line(out, (x0, y0), (x1, y1), color_gap, 2)
-    h = out.shape[0]
     cv2.line(out, (x0, max(0, y0 - 40)), (x0, min(h - 1, y0 + 40)), (0, 255, 0), 1)
     cv2.line(out, (x1, max(0, y1 - 40)), (x1, min(h - 1, y1 + 40)), (0, 0, 255), 1)
 
-    label = f'{gap.get("gap_px")}px'
+    # 이미지 크기에 맞는 글자 크기 (4K에서도 읽히게)
+    fs = max(0.7, out.shape[1] / 2600.0)
+    ft = max(2, int(round(fs * 2.5)))
+
+    def _dim_line(dx0, dx1, y_dim, color, label):
+        """수평 치수선 + 양끝 틱 + 라벨."""
+        y_dim = int(max(20, min(h - 20, y_dim)))
+        cv2.line(out, (dx0, y_dim), (dx1, y_dim), color, 2, cv2.LINE_AA)
+        for xx in (dx0, dx1):
+            cv2.line(out, (xx, y_dim - 12), (xx, y_dim + 12), color, 2, cv2.LINE_AA)
+        (tw, _th), _b = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, fs, ft)
+        cv2.putText(
+            out, label, (max(0, int(0.5 * (dx0 + dx1)) - tw // 2), max(30, y_dim - 14)),
+            cv2.FONT_HERSHEY_SIMPLEX, fs, color, ft, cv2.LINE_AA,
+        )
+
+    # 밝은 코어 끝점 (권장 측정값): 초록 사각형 + 위쪽 수평 치수선
+    lb = gap.get("left_end_bright") or {}
+    rb = gap.get("right_end_bright") or {}
+    bx0 = by0 = bx1 = by1 = None
+    try:
+        bx0, by0 = int(round(lb["x"])), int(round(lb["y"]))
+        bx1, by1 = int(round(rb["x"])), int(round(rb["y"]))
+    except Exception:
+        pass
+    if bx0 is not None and bx1 is not None:
+        cv2.rectangle(out, (bx0 - 8, by0 - 8), (bx0 + 8, by0 + 8), (0, 255, 0), 2)
+        cv2.rectangle(out, (bx1 - 8, by1 - 8), (bx1 + 8, by1 + 8), (0, 255, 0), 2)
+        blabel = f'dx(bright)={gap.get("gap_bright_px")}px'
+        if gap.get("gap_bright_mm") is not None:
+            blabel = f'dx(bright)={gap["gap_bright_mm"]}mm ({gap.get("gap_bright_px")}px)'
+        _dim_line(bx0, bx1, min(by0, by1) - 60, (0, 255, 0), blabel)
+
+    # raw 레이저 끝: 아래쪽 수평 치수선 (같은 형식으로 통일)
+    label = f'dx(raw)={gap.get("gap_px")}px'
     if gap.get("gap_mm") is not None:
-        label = f'{gap["gap_mm"]}mm ({gap.get("gap_px")}px)'
-    mx = int(round(0.5 * (x0 + x1)))
-    my = int(round(0.5 * (y0 + y1))) - 8
-    cv2.putText(
-        out, label, (max(0, mx - 40), max(16, my)),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA,
-    )
+        label = f'dx(raw)={gap["gap_mm"]}mm ({gap.get("gap_px")}px)'
+    _dim_line(x0, x1, max(y0, y1) + 70, color_gap, label)
     return out

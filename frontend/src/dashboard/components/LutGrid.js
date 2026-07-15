@@ -25,6 +25,7 @@ import { useCmsWorkspace } from './cms/useCmsWorkspace';
 import { formatLutLabel } from './cms/constants';
 import CmsSetupCard from './cms/CmsSetupCard';
 import ResultImageCard from './cms/ResultImageCard';
+import LaserColorToggle from './cms/LaserColorToggle';
 
 export default function LutGrid() {
   const ws = useCmsWorkspace();
@@ -132,9 +133,12 @@ export default function LutGrid() {
             <Grid container spacing={2} columns={12} disableEqualOverflow sx={{ alignItems: 'center' }}>
               <Grid size={{ xs: 12, md: 5 }}>
                 <Stack spacing={1} sx={{ height: '100%' }}>
-                  <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'text.secondary' }}>
-                    1. 캡처 &amp; 검출
-                  </Typography>
+                  <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', justifyContent: 'space-between' }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'text.secondary' }}>
+                      1. 캡처 &amp; 검출
+                    </Typography>
+                    <LaserColorToggle value={ws.laserColor} onChange={ws.setLaserColor} disabled={ws.loading} />
+                  </Stack>
                   <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ alignItems: 'center' }}>
                     <Button
                       variant="contained"

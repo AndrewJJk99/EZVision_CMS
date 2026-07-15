@@ -27,6 +27,7 @@ import { formatLutLabel } from './cms/constants';
 import CmsSetupCard from './cms/CmsSetupCard';
 import ResultImageCard from './cms/ResultImageCard';
 import RoiPickDialog from './cms/RoiPickDialog';
+import LaserColorToggle from './cms/LaserColorToggle';
 
 export default function MeasurementGrid() {
   const ws = useCmsWorkspace();
@@ -272,7 +273,18 @@ export default function MeasurementGrid() {
       }}
     >
       <Stack spacing={1.5} sx={{ minWidth: 0, maxWidth: '100%', flex: 1, minHeight: 0, overflow: 'hidden' }}>
-        <Box sx={{ flexShrink: 0, borderBottom: 1, borderColor: 'divider' }}>
+        <Box
+          sx={{
+            flexShrink: 0,
+            borderBottom: 1,
+            borderColor: 'divider',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 1,
+            pr: 1,
+          }}
+        >
           <Tabs
             value={measurementTab}
             onChange={(_, value) => {
@@ -288,6 +300,7 @@ export default function MeasurementGrid() {
             <Tab value="flush" label="단차" sx={{ minHeight: 40, fontWeight: 600 }} />
             <Tab value="gap" label="간격" sx={{ minHeight: 40, fontWeight: 600 }} />
           </Tabs>
+          <LaserColorToggle value={ws.laserColor} onChange={ws.setLaserColor} disabled={ws.loading} />
         </Box>
 
         <Box sx={{ flexShrink: 0 }}>
@@ -684,18 +697,27 @@ export default function MeasurementGrid() {
                       {gapResult.mode === 'roi' ? ' (A/B)' : ' (자동)'}
                     </Typography>
                     <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
-                      {gapResult.gap_mm != null
-                        ? `${gapResult.gap_mm} mm`
-                        : gapResult.gap_px != null
-                          ? `${gapResult.gap_px} px`
-                          : '—'}
-                      {gapResult.gap_mm != null && gapResult.gap_px != null && (
+                      {gapResult.gap_bright_mm != null
+                        ? `${gapResult.gap_bright_mm} mm`
+                        : gapResult.gap_bright_px != null
+                          ? `${gapResult.gap_bright_px} px`
+                          : gapResult.gap_mm != null
+                            ? `${gapResult.gap_mm} mm`
+                            : gapResult.gap_px != null
+                              ? `${gapResult.gap_px} px`
+                              : '—'}
+                      {gapResult.gap_bright_px != null && (
                         <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 1 }}>
-                          ({gapResult.gap_px} px
+                          (밝은코어 {gapResult.gap_bright_px} px
                           {gapResult.mm_per_px != null ? ` × ${gapResult.mm_per_px}` : ''})
                         </Typography>
                       )}
                     </Typography>
+                    {gapResult.gap_px != null && gapResult.gap_bright_px != null && (
+                      <Typography variant="body2" color="text.secondary" sx={{ mb: 0.5 }}>
+                        레이저 끝(raw) 기준: {gapResult.gap_mm != null ? `${gapResult.gap_mm} mm ` : ''}({gapResult.gap_px} px)
+                      </Typography>
+                    )}
                     {gapResult?.left_end && gapResult?.right_end && (
                       <Typography variant="caption" color="text.secondary" display="block">
                         L ({gapResult.left_end.x}, {gapResult.left_end.y}) → R ({gapResult.right_end.x}, {gapResult.right_end.y})

@@ -211,15 +211,20 @@ async def _capture_undistorted(camera_id: int, calibration_file: Optional[str]):
 
 
 class LaserDetectParams(BaseModel):
-    """강건 자동 검출 옵션. 색상·노이즈 임계값은 검출기가 장면에서 결정한다."""
+    """강건 자동 검출 옵션. 노이즈 임계값은 검출기가 장면에서 결정한다."""
     roi_y0: Optional[int] = Field(None, ge=0)
     roi_y1: Optional[int] = Field(None, ge=0)
+    laser_color: str = Field("blue", description="레이저 색: blue | red")
 
 
 def _laser_kwargs(req: "LaserDetectParams") -> dict:
+    color = str(getattr(req, "laser_color", "blue") or "blue").lower()
+    if color not in ("blue", "red"):
+        color = "blue"
     return {
         "roi_y0": req.roi_y0,
         "roi_y1": req.roi_y1,
+        "laser_color": color,
     }
 
 
@@ -553,7 +558,8 @@ async def laser_detect(camera_id: int, req: LaserDetectRequest = LaserDetectRequ
         "coverage": round(len(points) / max(1, cw), 3),
         "calibration_file": calib_file,
         "image_size": {"width": int(cw), "height": int(ch)},
-        "detector": "robust_blue_ridge_v2",
+        "detector": (laser_quality or {}).get("detector", "robust_blue_ridge_v2"),
+        "laser_color": laser_kw.get("laser_color", "blue"),
         "laser_quality": laser_quality,
     }
 
@@ -619,7 +625,8 @@ async def lut_image_detect(camera_id: int, req: LutImageDetectRequest = LutImage
         "lut_file": lut.get("_lut_file"),
         "image_file": image_file,
         "image_size": {"width": int(cw), "height": int(ch)},
-        "detector": "robust_blue_ridge_v2",
+        "detector": (laser_quality or {}).get("detector", "robust_blue_ridge_v2"),
+        "laser_color": _laser_kwargs(req).get("laser_color", "blue"),
         "laser_quality": laser_quality,
     }
 
@@ -1242,6 +1249,13 @@ async def measure_gap(camera_id: int, req: GapMeasureRequest):
         calibration_file=req.calibration_file or calib_file,
     )
 
+    # 밝은 코어 끝점 판정용 밝기 맵 (검출과 동일 정의, 레이저 색에 맞춘 우세 채널)
+    _b = undistorted[:, :, 0].astype(np.float64)
+    _g = undistorted[:, :, 1].astype(np.float64)
+    _r = undistorted[:, :, 2].astype(np.float64)
+    _main = _r if laser_kw.get("laser_color") == "red" else _b
+    gap_intensity = np.maximum(_main, 0.5 * (_b + _g + _r))
+
     use_roi = req.a_roi is not None and req.b_roi is not None
     if use_roi:
         gap, err = lm.measure_gap_from_rois(
@@ -1250,6 +1264,7 @@ async def measure_gap(camera_id: int, req: GapMeasureRequest):
             req.b_roi.model_dump(),
             fit_len=req.fit_len,
             mm_per_px=mm_per_px,
+            intensity=gap_intensity,
         )
     else:
         gap, err = lm.measure_gap_from_profile(
@@ -1263,6 +1278,7 @@ async def measure_gap(camera_id: int, req: GapMeasureRequest):
             search_x0=req.search_x0,
             search_x1=req.search_x1,
             min_step_dy_px=req.min_step_dy_px,
+            intensity=gap_intensity,
         )
     if err:
         overlay = lm.draw_profile(undistorted, profile)
@@ -1297,12 +1313,16 @@ async def measure_gap(camera_id: int, req: GapMeasureRequest):
         "gap_euclid_px": gap["gap_euclid_px"],
         "gap_mm": gap["gap_mm"],
         "gap_euclid_mm": gap["gap_euclid_mm"],
+        "gap_bright_px": gap.get("gap_bright_px"),
+        "gap_bright_mm": gap.get("gap_bright_mm"),
         "mm_per_px": gap["mm_per_px"],
         "step_dy_px": gap.get("step_dy_px"),
         "scale": scale_meta,
         "mode": gap.get("mode") or ("roi" if use_roi else "auto"),
         "left_end": gap["left_end"],
         "right_end": gap["right_end"],
+        "left_end_bright": gap.get("left_end_bright"),
+        "right_end_bright": gap.get("right_end_bright"),
         "left_segment": gap["left_segment"],
         "right_segment": gap["right_segment"],
         "segment_count": gap["segment_count"],

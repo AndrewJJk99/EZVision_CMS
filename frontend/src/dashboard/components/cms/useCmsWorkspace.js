@@ -27,8 +27,27 @@ export function useCmsWorkspace() {
   const [message, setMessage] = React.useState('');
   const [severity, setSeverity] = React.useState('info');
 
-  // 레이저 검출은 백엔드의 단일 강건 자동 검출기가 담당한다.
-  const detectionPayload = React.useCallback(() => ({}), []);
+  // 레이저 색(파랑/빨강) — 페이지 간 유지되도록 localStorage에 저장.
+  const [laserColor, setLaserColorState] = React.useState(() => {
+    try {
+      const v = window.localStorage.getItem('cms_laser_color');
+      return v === 'red' || v === 'blue' ? v : 'blue';
+    } catch (e) {
+      return 'blue';
+    }
+  });
+  const setLaserColor = React.useCallback((color) => {
+    const c = color === 'red' ? 'red' : 'blue';
+    setLaserColorState(c);
+    try {
+      window.localStorage.setItem('cms_laser_color', c);
+    } catch (e) {
+      /* ignore */
+    }
+  }, []);
+
+  // 레이저 검출은 백엔드의 단일 강건 자동 검출기가 담당한다. 색만 전달.
+  const detectionPayload = React.useCallback(() => ({ laser_color: laserColor }), [laserColor]);
 
   const refreshCalibrations = React.useCallback(async () => {
     try {
@@ -140,5 +159,7 @@ export function useCmsWorkspace() {
     detectionPayload,
     applyCaptureResult,
     refreshCalibrations,
+    laserColor,
+    setLaserColor,
   };
 }
