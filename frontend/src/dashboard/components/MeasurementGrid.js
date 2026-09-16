@@ -12,6 +12,7 @@ import Alert from '@mui/material/Alert';
 import Chip from '@mui/material/Chip';
 import Checkbox from '@mui/material/Checkbox';
 import FormControlLabel from '@mui/material/FormControlLabel';
+import Switch from '@mui/material/Switch';
 import Tabs from '@mui/material/Tabs';
 import Tab from '@mui/material/Tab';
 import Table from '@mui/material/Table';
@@ -49,6 +50,7 @@ export default function MeasurementGrid() {
   const [gapMinPx, setGapMinPx] = React.useState(2);
   const [gapMaxPx, setGapMaxPx] = React.useState(400);
   const [gapMinStepDy, setGapMinStepDy] = React.useState('');
+  const [gapLineMode, setGapLineMode] = React.useState(false);
   const [gapARoi, setGapARoi] = React.useState(null);
   const [gapBRoi, setGapBRoi] = React.useState(null);
   const [gapCaptured, setGapCaptured] = React.useState(false);
@@ -214,6 +216,11 @@ export default function MeasurementGrid() {
       const minStepDy = parseFloat(gapMinStepDy);
       if (!useRoi && Number.isFinite(minStepDy) && minStepDy > 0) {
         payload.min_step_dy_px = minStepDy;
+      }
+      // 라인 모드(차체 반사 대응): 색차 검출 + 최대 불연속 엣지
+      if (gapLineMode && !useRoi) {
+        payload.detector = 'chroma';
+        payload.edge_mode = 'discontinuity';
       }
       if (useRoi) {
         payload.a_roi = { x0: a.x0, y0: a.y0, x1: a.x1, y1: a.y1 };
@@ -614,6 +621,21 @@ export default function MeasurementGrid() {
                       </Button>
                     </Grid>
                   </Grid>
+                  <FormControlLabel
+                    sx={{ mt: 0.5 }}
+                    control={
+                      <Switch
+                        size="small"
+                        checked={gapLineMode}
+                        onChange={(e) => setGapLineMode(e.target.checked)}
+                      />
+                    }
+                    label={
+                      <Typography variant="body2">
+                        <b>라인 모드</b> — 실차 차체(반사 대응). 색차 검출 + 이음부 최대 불연속으로 엣지 확정
+                      </Typography>
+                    }
+                  />
                 </Box>
 
                 <Box sx={{ pt: 0.5, borderTop: 1, borderColor: 'divider' }}>
@@ -694,8 +716,36 @@ export default function MeasurementGrid() {
                   >
                     <Typography variant="subtitle2" sx={{ fontWeight: 600, mb: 0.5 }}>
                       측정 결과
-                      {gapResult.mode === 'roi' ? ' (A/B)' : ' (자동)'}
+                      {gapResult.mode === 'discontinuity'
+                        ? ' (라인 모드)'
+                        : gapResult.mode === 'roi'
+                          ? ' (A/B)'
+                          : ' (자동)'}
                     </Typography>
+                    {gapResult.mode === 'discontinuity' ? (
+                      <>
+                        <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
+                          {gapResult.gap_mm != null
+                            ? `${gapResult.gap_mm} mm`
+                            : `${gapResult.gap_px} px`}
+                          <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 1 }}>
+                            (dx {gapResult.gap_px} px{gapResult.mm_per_px != null ? ` × ${gapResult.mm_per_px}` : ''})
+                          </Typography>
+                        </Typography>
+                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mb: 0.5 }}>
+                          <Chip size="small" label={gapResult.kind === 'hole' ? '끊김(갭)' : '단차(step)'} color="primary" />
+                          <Chip size="small" variant="outlined" label={`단차 dy ${gapResult.step_dy_px}px`} />
+                          <Chip size="small" variant="outlined" label={`SNR ${gapResult.snr}`}
+                            color={gapResult.snr >= 8 ? 'success' : 'warning'} />
+                        </Stack>
+                        {gapResult?.left_end && gapResult?.right_end && (
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            L ({gapResult.left_end.x}, {gapResult.left_end.y}) → R ({gapResult.right_end.x}, {gapResult.right_end.y})
+                          </Typography>
+                        )}
+                      </>
+                    ) : (
+                    <>
                     <Typography variant="h6" sx={{ fontWeight: 700, mb: 0.5 }}>
                       {gapResult.gap_bright_mm != null
                         ? `${gapResult.gap_bright_mm} mm`
@@ -726,6 +776,8 @@ export default function MeasurementGrid() {
                           ? `  · ${gapResult.left_segment.label}↔${gapResult.right_segment.label}`
                           : ''}
                       </Typography>
+                    )}
+                    </>
                     )}
                   </Box>
                 )}

@@ -18,12 +18,15 @@ import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
+import Switch from '@mui/material/Switch';
 import {
+  calibrationAutoTick,
   captureCalibrationSample,
   getCalibrationStatus,
   resetCalibrationSamples,
   runCalibration,
   saveCalibration,
+  setCalibrationAuto,
   startCalibration,
   stopCalibration,
 } from '../../../../services/camera.api';
@@ -65,6 +68,9 @@ export default function CalibrationPanel() {
   const [message, setMessage] = React.useState('');
   const [captureBusy, setCaptureBusy] = React.useState(false);
   const captureBusyRef = React.useRef(false);
+  const [autoMode, setAutoMode] = React.useState(false);
+  const [autoInfo, setAutoInfo] = React.useState(null);
+  const autoInFlightRef = React.useRef(false);
   const [savedCalibs, setSavedCalibs] = React.useState([]);
   const [planeCalibFile, setPlaneCalibFile] = React.useState('');
   const [planeScaleBusy, setPlaneScaleBusy] = React.useState(false);
@@ -132,6 +138,8 @@ export default function CalibrationPanel() {
       setStatus(res?.status || null);
       setResult(null);
       setForceSave(false);
+      setAutoMode(false);
+      setAutoInfo(null);
       setMessage('캘리브레이션 시작 — 중앙·가장자리·기울인 포즈를 골고루 촬영하세요');
     } catch (e) {
       setMessage(e?.data?.error || e.message);
@@ -140,6 +148,8 @@ export default function CalibrationPanel() {
 
   const handleStop = async () => {
     setSessionActive(false);
+    setAutoMode(false);
+    setAutoInfo(null);
     setCalibrationTarget(cameraIdBackend, false);
     setMessage('캘리브레이션 모드 종료');
     try {
@@ -168,6 +178,58 @@ export default function CalibrationPanel() {
       setPreviewBusy(false);
     }
   };
+
+  const handleToggleAuto = async (enabled) => {
+    setAutoMode(enabled);
+    setAutoInfo(null);
+    try {
+      const res = await setCalibrationAuto(cameraIdBackend, enabled);
+      setStatus(res?.status || null);
+      setMessage(res?.message || (enabled ? '자동 모드 시작' : '자동 모드 해제'));
+    } catch (e) {
+      setAutoMode(false);
+      setMessage(e?.data?.error || e?.message || '자동 모드 전환 실패');
+    }
+  };
+
+  // 자동 수집 루프 — 보드가 멈출 때마다 서버가 원본을 잡아 샘플로 담는다
+  React.useEffect(() => {
+    if (!autoMode || !sessionActive) return undefined;
+
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || autoInFlightRef.current) return;
+      autoInFlightRef.current = true;
+      try {
+        const res = await calibrationAutoTick(cameraIdBackend);
+        if (cancelled) return;
+        if (res?.status) setStatus(res.status);
+        if (res?.auto) setAutoInfo(res.auto);
+        if (res?.accepted && res?.sample_message) setMessage(res.sample_message);
+        if (res?.finished) {
+          setResult(res.finished);
+          setAutoMode(false);
+          setMessage(
+            res.saved_path
+              ? `자동 캘리브레이션 완료 · 저장됨 (${String(res.saved_path).split(/[/\\]/).pop()})`
+              : '자동 캘리브레이션 완료 — 품질 미달로 저장 보류 (검토 후 수동 저장)',
+          );
+          await refreshSavedCalibs();
+        }
+      } catch (e) {
+        // 일시적 실패(프레임 없음 등)는 다음 틱에 재시도
+      } finally {
+        autoInFlightRef.current = false;
+      }
+    };
+
+    const id = setInterval(tick, 400);
+    tick();
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [autoMode, sessionActive, cameraIdBackend, refreshSavedCalibs]);
 
   const handleRun = async () => {
     try {
@@ -338,6 +400,25 @@ export default function CalibrationPanel() {
           <BoxGuide qualityGuide={qualityGuide} poseRatio={poseRatio} />
         )}
 
+        {sessionActive && (
+          <FormControlLabel
+            sx={{ mt: 1.5, display: 'block' }}
+            control={
+              <Switch
+                checked={autoMode}
+                onChange={(e) => handleToggleAuto(e.target.checked)}
+              />
+            }
+            label={
+              <Typography variant="body2">
+                <b>자동 모드</b> — 보드를 옮기고 잠깐 멈추면 알아서 담고, 충분해지면 자동 계산·저장
+              </Typography>
+            }
+          />
+        )}
+
+        {sessionActive && autoMode && <AutoProgress autoInfo={autoInfo} status={status} />}
+
         <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: 2, mb: 1 }}>
           {!sessionActive ? (
             <Button variant="contained" onClick={handleStart}>
@@ -348,20 +429,24 @@ export default function CalibrationPanel() {
               <Button variant="outlined" color="warning" onClick={handleStop}>
                 종료
               </Button>
-              <Button
-                variant="contained"
-                onClick={handleCapture}
-                sx={{ minWidth: 104 }}
-              >
-                {captureBusy ? '캡처 중' : '샘플 캡처'}
-              </Button>
-              <Button variant="contained" color="secondary" onClick={handleRun}>
-                캘리브레이션 실행
-              </Button>
+              {!autoMode && (
+                <>
+                  <Button
+                    variant="contained"
+                    onClick={handleCapture}
+                    sx={{ minWidth: 104 }}
+                  >
+                    {captureBusy ? '캡처 중' : '샘플 캡처'}
+                  </Button>
+                  <Button variant="contained" color="secondary" onClick={handleRun}>
+                    캘리브레이션 실행
+                  </Button>
+                </>
+              )}
               <Button variant="outlined" onClick={handleSave} disabled={!canSave}>
                 결과 저장
               </Button>
-              <Button variant="text" onClick={handleReset}>
+              <Button variant="text" onClick={handleReset} disabled={autoMode}>
                 샘플 초기화
               </Button>
             </>
@@ -510,6 +595,114 @@ export default function CalibrationPanel() {
         </Box>
       </CardContent>
     </Card>
+  );
+}
+
+function AutoProgress({ autoInfo, status }) {
+  const samples = autoInfo?.sample_count ?? status?.sample_count ?? 0;
+  const maxSamples = autoInfo?.max_samples ?? 30;
+  const zones = autoInfo?.zones_covered ?? 0;
+  const zonesReq = autoInfo?.zones_required ?? 4;
+  const detected = autoInfo?.detected;
+  const reason = autoInfo?.reason || '카메라 대기 중…';
+  const confidence = autoInfo?.confidence ?? 0;
+  const std = autoInfo?.param_std;
+  const rms = autoInfo?.rms_error ?? status?.rms_error;
+
+  let stateLabel = '대기';
+  let stateColor = 'default';
+  if (autoInfo?.done) {
+    stateLabel = '완료';
+    stateColor = 'success';
+  } else if (autoInfo?.converged) {
+    stateLabel = '수렴';
+    stateColor = 'success';
+  } else if (!detected) {
+    stateLabel = '보드 미검출';
+    stateColor = 'default';
+  } else if (autoInfo?.still_ticks > 0) {
+    stateLabel = '정지 감지 중';
+    stateColor = 'info';
+  } else {
+    stateLabel = '이동 중';
+    stateColor = 'warning';
+  }
+
+  const pct = Math.round(Math.min(1, Math.max(0, confidence)) * 100);
+
+  return (
+    <Stack spacing={0.75} sx={{ mt: 1.5, p: 1.5, bgcolor: 'action.hover', borderRadius: 1 }}>
+      <Stack direction="row" spacing={1} alignItems="baseline">
+        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+          정확도 신뢰도
+        </Typography>
+        <Typography
+          variant="h6"
+          sx={{ fontWeight: 700 }}
+          color={pct >= 100 ? 'success.main' : 'text.primary'}
+        >
+          {pct}%
+        </Typography>
+      </Stack>
+      <LinearProgress
+        variant="determinate"
+        value={pct}
+        color={pct >= 100 ? 'success' : 'primary'}
+        sx={{ height: 8, borderRadius: 1 }}
+      />
+      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap alignItems="center">
+        <Chip size="small" label={stateLabel} color={stateColor} />
+        <Chip size="small" label={`샘플 ${samples} / 최대 ${maxSamples}`} />
+        {rms != null && <Chip size="small" color="info" label={`RMS ${Number(rms).toFixed(4)} px`} />}
+        {std?.fx_rel != null && (
+          <Chip size="small" variant="outlined" label={`σfx ${(std.fx_rel * 100).toFixed(3)}%`} />
+        )}
+        {std?.cx != null && (
+          <Chip size="small" variant="outlined" label={`σcx ${std.cx.toFixed(2)}px`} />
+        )}
+        {autoInfo?.motion_px != null && (
+          <Chip size="small" variant="outlined" label={`이동 ${autoInfo.motion_px}px`} />
+        )}
+      </Stack>
+      <AxisBars cov={autoInfo?.axis_coverage} minSkew={autoInfo?.min_skew_coverage} minPos={autoInfo?.min_pos_coverage} />
+      <Typography variant="caption" color="text.secondary">
+        {reason}
+        {samples < 8 && ' · 계산 시작까지 최소 8장 필요'}
+      </Typography>
+    </Stack>
+  );
+}
+
+function AxisBars({ cov, minSkew = 0.25, minPos = 0.4 }) {
+  const axes = [
+    { key: 'x', label: '좌우', need: minPos },
+    { key: 'y', label: '상하', need: minPos },
+    { key: 'size', label: '거리', need: 0.0 },
+    { key: 'skew', label: '기울기', need: minSkew },
+  ];
+  return (
+    <Stack direction="row" spacing={1} sx={{ mt: 0.25 }}>
+      {axes.map((a) => {
+        const v = cov?.[a.key] ?? 0;
+        const met = v >= a.need;
+        return (
+          <Box key={a.key} sx={{ flex: 1, minWidth: 0 }}>
+            <Typography
+              variant="caption"
+              sx={{ display: 'block', fontSize: 10, color: met ? 'success.main' : 'text.secondary' }}
+            >
+              {a.label} {a.need > 0 && !met ? '⚠' : ''}
+            </Typography>
+            <LinearProgress
+              variant="determinate"
+              value={Math.min(100, v * 100)}
+              color={met && a.need > 0 ? 'success' : 'primary'}
+              sx={{ height: 5, borderRadius: 1 }}
+            />
+          </Box>
+        );
+      })}
+    </Stack>
   );
 }
 

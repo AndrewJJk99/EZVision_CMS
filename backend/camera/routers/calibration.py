@@ -30,6 +30,10 @@ router = APIRouter(prefix="/calibration", tags=["calibration"])
 CALIB_SAVE_DIR = os.path.join(os.path.dirname(__file__), "..", "calibration_data")
 
 
+class AutoModeRequest(BaseModel):
+    enabled: bool = Field(True, description="자동 수집 모드 on/off")
+
+
 class CalibrationConfigRequest(BaseModel):
     inner_cols: int = Field(3, ge=2, le=20, description="체커보드 내부 코너 열 수")
     inner_rows: int = Field(3, ge=2, le=20, description="체커보드 내부 코너 행 수")
@@ -98,6 +102,7 @@ def _session_status(session) -> dict:
         "recommended_samples": RECOMMENDED_SAMPLES,
         "distortion_model": session.config.distortion_model,
         "calib_flags": session.calib_flags,
+        "auto": session.auto_state(),
         "image_size": (
             {"width": session.image_size[0], "height": session.image_size[1]}
             if session.image_size
@@ -216,6 +221,136 @@ async def capture_sample(camera_id: int):
             "status": _session_status(session),
         },
     )
+
+
+@router.post("/auto/{camera_id}")
+async def set_auto_mode(camera_id: int, req: AutoModeRequest = AutoModeRequest()):
+    """자동 수집 모드 on/off."""
+    if camera_id < 0 or camera_id >= 4:
+        return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
+
+    session = calibration_manager.get_session(camera_id)
+    if req.enabled and not session.active:
+        return JSONResponse(status_code=400, content={"error": "Calibration session is not active"})
+
+    session.auto_enabled = bool(req.enabled)
+    session.auto_reset()
+    session.last_message = (
+        "자동 모드 시작 — 보드를 여러 위치로 옮기고 잠깐씩 멈추세요"
+        if req.enabled
+        else "자동 모드 해제"
+    )
+    return {"message": session.last_message, "status": _session_status(session)}
+
+
+@router.post("/auto/tick/{camera_id}")
+async def auto_tick(camera_id: int):
+    """자동 수집 루프 1스텝 (프론트가 주기 호출).
+
+    판정은 축소 프리뷰로, 실제 샘플은 원본을 다시 grab해 담는다
+    (해상도·정확도는 수동 캡처와 동일).
+    """
+    if camera_id < 0 or camera_id >= 4:
+        return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
+
+    session = calibration_manager.get_session(camera_id)
+    if not session.active or not session.auto_enabled or session.auto_done:
+        return {
+            "idle": True,
+            "accepted": False,
+            "status": _session_status(session),
+        }
+
+    preview = await _fetch_bgr_preview(camera_id)
+    if preview is None:
+        # 카메라 락 경합/버퍼 비었을 때는 조용히 건너뛴다 (다음 틱에 재시도)
+        return {"skipped": True, "accepted": False, "status": _session_status(session)}
+
+    decision = await asyncio.to_thread(session.auto_evaluate, preview)
+
+    accepted = False
+    sample_message = None
+    if decision.get("accept"):
+        full = await _fetch_bgr(camera_id, retry_count=2)
+        if full is not None:
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(session.add_sample, full),
+                    timeout=CAPTURE_DETECT_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                result = {"success": False, "message": "원본 검출 시간 초과"}
+            accepted = bool(result.get("success"))
+            sample_message = result.get("message")
+            # 성공/실패 모두 쿨다운 — 같은 프레임을 연속 재시도하지 않도록
+            session.mark_auto_accepted()
+
+    # 샘플이 들어올 때마다 증분 재계산 → σ(불확실성) 갱신 후 수렴 판정
+    if accepted and session.sample_count >= MIN_SAMPLES:
+        await asyncio.to_thread(session.run_calibration)
+        session.check_converged()
+
+    # 종료 조건 충족 → 최종 결과 확정 (+ 품질 Pass면 자동 저장)
+    finished = None
+    saved_path = None
+    if session.auto_ready():
+        if session.last_calib_at_count == session.sample_count and session.camera_matrix is not None:
+            # 방금 증분 재계산한 결과가 최신 — 중복 solve 생략
+            calib = {
+                "success": True,
+                "message": "캘리브레이션 완료",
+                "rms_error": session.rms_error,
+                "per_view_errors": session.per_view_errors,
+                "all_per_view_errors": session.per_view_errors,
+                "excluded_sample_indices": session.excluded_sample_indices,
+                "camera_matrix": session.camera_matrix.tolist(),
+                "dist_coeffs": session.dist_coeffs.reshape(-1).tolist(),
+                "focal_length_px": {
+                    "fx": float(session.camera_matrix[0, 0]),
+                    "fy": float(session.camera_matrix[1, 1]),
+                },
+                "principal_point_px": {
+                    "cx": float(session.camera_matrix[0, 2]),
+                    "cy": float(session.camera_matrix[1, 2]),
+                },
+                "sample_count": session.sample_count,
+                "quality_report": session.quality_report,
+                "param_std": session.param_std,
+                "confidence": round(session.confidence, 3),
+                "converged": session.converged,
+            }
+        else:
+            calib = await asyncio.to_thread(session.run_calibration)
+        finished = calib
+        report = calib.get("quality_report") or session.quality_report or {}
+        if calib.get("success") and report.get("pass"):
+            try:
+                saved_path = session.save(CALIB_SAVE_DIR)
+                session.last_message = f"자동 캘리브레이션 완료 · 저장됨 ({os.path.basename(saved_path)})"
+            except Exception as e:  # 저장 실패해도 계산 결과는 유지
+                session.last_message = f"캘리브레이션 완료 — 저장 실패: {e}"
+        elif calib.get("success"):
+            session.last_message = "자동 캘리브레이션 완료 — 품질 미달로 저장 보류 (검토 후 수동 저장)"
+        else:
+            session.last_message = calib.get("message") or "자동 캘리브레이션 실패"
+        session.auto_done = True
+        session.auto_enabled = False
+
+    return {
+        "accepted": accepted,
+        "sample_message": sample_message,
+        "auto": {
+            "detected": decision.get("detected"),
+            "still_ticks": decision.get("still_ticks"),
+            "motion_px": decision.get("motion_px"),
+            "zone": decision.get("zone"),
+            "reason": decision.get("reason"),
+            **session.auto_state(),
+        },
+        "finished": finished,
+        "saved_path": saved_path,
+        "status": _session_status(session),
+    }
 
 
 @router.post("/run/{camera_id}")

@@ -214,18 +214,41 @@ class LaserDetectParams(BaseModel):
     """강건 자동 검출 옵션. 노이즈 임계값은 검출기가 장면에서 결정한다."""
     roi_y0: Optional[int] = Field(None, ge=0)
     roi_y1: Optional[int] = Field(None, ge=0)
-    laser_color: str = Field("blue", description="레이저 색: blue | red")
+    laser_color: str = Field("blue", description="레이저 색: blue | red | auto(자동판정)")
+    detector: str = Field(
+        "ridge", description="검출 방식: ridge(기본) | chroma(라인 모드, 차체 반사 대응)"
+    )
 
 
 def _laser_kwargs(req: "LaserDetectParams") -> dict:
     color = str(getattr(req, "laser_color", "blue") or "blue").lower()
-    if color not in ("blue", "red"):
+    if color not in ("blue", "red", "auto"):
         color = "blue"
+    det = str(getattr(req, "detector", "ridge") or "ridge").lower()
+    if det not in ("ridge", "chroma"):
+        det = "ridge"
     return {
         "roi_y0": req.roi_y0,
         "roi_y1": req.roi_y1,
         "laser_color": color,
+        "detector": det,
     }
+
+
+def _resolve_laser_color(laser_kw: dict, img: np.ndarray) -> bool:
+    """laser_kw['laser_color']가 'auto'면 이미지로 색을 판정해 실제 색으로 치환한다.
+
+    반환: 자동판정이 수행됐는지 여부(True/False).
+    """
+    color = str(laser_kw.get("laser_color") or "blue").lower()
+    if color == "auto":
+        try:
+            laser_kw["laser_color"] = lm.detect_laser_color(img)
+        except Exception:
+            laser_kw["laser_color"] = "blue"
+        return True
+    laser_kw["laser_color"] = color if color in ("blue", "red") else "blue"
+    return False
 
 
 class CaptureRequest(BaseModel):
@@ -307,6 +330,16 @@ class GapMeasureRequest(LaserDetectParams):
     search_x1: Optional[int] = Field(None, ge=0)
     min_step_dy_px: Optional[float] = Field(
         None, ge=0, le=500, description="자동 모드에서 이 이상 y가 다른(다른 단) 세그먼트 쌍만 후보로 사용"
+    )
+    edge_mode: str = Field(
+        "segment",
+        description="엣지 판정: segment(기본, 세그먼트 쌍) | discontinuity(라인 모드, 최대 불연속)",
+    )
+    end_margin_px: int = Field(
+        lm.DEFAULT_EDGE_END_MARGIN_PX,
+        ge=0,
+        le=2000,
+        description="라인 모드: 레이저 양끝 산란 번짐(bloom) 제외 폭(px). 0=제외 안 함",
     )
     a_roi: Optional[RoiRect] = None
     b_roi: Optional[RoiRect] = None
@@ -510,6 +543,7 @@ async def laser_detect(camera_id: int, req: LaserDetectRequest = LaserDetectRequ
         calib_file = meta.get("_calibration_file")
 
     laser_kw = _laser_kwargs(req)
+    color_auto = _resolve_laser_color(laser_kw, undistorted)  # 'auto'면 색 판정
     mode = (req.detect_mode or "default").lower()
     if mode == "lut":
         profile, _mask, laser_quality = lm.detect_laser_profile_for_lut(
@@ -560,6 +594,7 @@ async def laser_detect(camera_id: int, req: LaserDetectRequest = LaserDetectRequ
         "image_size": {"width": int(cw), "height": int(ch)},
         "detector": (laser_quality or {}).get("detector", "robust_blue_ridge_v2"),
         "laser_color": laser_kw.get("laser_color", "blue"),
+        "color_auto": color_auto,
         "laser_quality": laser_quality,
     }
 
@@ -594,9 +629,11 @@ async def lut_image_detect(camera_id: int, req: LutImageDetectRequest = LutImage
     if undistorted is None:
         return JSONResponse(status_code=500, content={"error": "저장 이미지 로드 실패"})
 
+    laser_kw = _laser_kwargs(req)
+    color_auto = _resolve_laser_color(laser_kw, undistorted)  # 'auto'면 색 판정
     profile, _mask, laser_quality = lm.detect_laser_profile_for_lut(
         undistorted,
-        **_laser_kwargs(req),
+        **laser_kw,
         return_quality=True,
     )
     points = lm.profile_to_points(profile)
@@ -605,7 +642,7 @@ async def lut_image_detect(camera_id: int, req: LutImageDetectRequest = LutImage
         "img": undistorted,
         "profile": profile,
         "points": points,
-        "laser_kwargs": _laser_kwargs(req),
+        "laser_kwargs": laser_kw,
         "calibration_file": lut.get("calibration_file"),
         "lut_file": lut.get("_lut_file"),
         "image_file": image_file,
@@ -626,7 +663,8 @@ async def lut_image_detect(camera_id: int, req: LutImageDetectRequest = LutImage
         "image_file": image_file,
         "image_size": {"width": int(cw), "height": int(ch)},
         "detector": (laser_quality or {}).get("detector", "robust_blue_ridge_v2"),
-        "laser_color": _laser_kwargs(req).get("laser_color", "blue"),
+        "laser_color": laser_kw.get("laser_color", "blue"),
+        "color_auto": color_auto,
         "laser_quality": laser_quality,
     }
 
@@ -1223,6 +1261,8 @@ async def measure_gap(camera_id: int, req: GapMeasureRequest):
         calib_file = meta.get("_calibration_file")
 
     laser_kw = _laser_kwargs(req)
+    color_auto = _resolve_laser_color(laser_kw, undistorted)  # 'auto'면 색 판정
+    resolved_color = laser_kw.get("laser_color", "blue")
 
     if req.redetect or stored is None or stored.get("profile") is None:
         profile, _mask = lm.detect_laser_profile_for_gap(undistorted, **laser_kw)
@@ -1257,7 +1297,13 @@ async def measure_gap(camera_id: int, req: GapMeasureRequest):
     gap_intensity = np.maximum(_main, 0.5 * (_b + _g + _r))
 
     use_roi = req.a_roi is not None and req.b_roi is not None
-    if use_roi:
+    edge_mode = (req.edge_mode or "segment").lower()
+    if edge_mode == "discontinuity" and not use_roi:
+        # 라인 모드 — 프로파일의 최대 불연속(이음부)을 엣지로
+        gap, err = lm.measure_edge_from_profile(
+            profile, mm_per_px=mm_per_px, end_margin_px=req.end_margin_px
+        )
+    elif use_roi:
         gap, err = lm.measure_gap_from_rois(
             profile,
             req.a_roi.model_dump(),
@@ -1309,28 +1355,35 @@ async def measure_gap(camera_id: int, req: GapMeasureRequest):
     overlay = lm.draw_gap_overlay(undistorted, profile, gap)
     return {
         **_overlay_payload(overlay, points),
-        "gap_px": gap["gap_px"],
-        "gap_euclid_px": gap["gap_euclid_px"],
-        "gap_mm": gap["gap_mm"],
-        "gap_euclid_mm": gap["gap_euclid_mm"],
+        "gap_px": gap.get("gap_px"),
+        "gap_euclid_px": gap.get("gap_euclid_px"),
+        "gap_mm": gap.get("gap_mm"),
+        "gap_euclid_mm": gap.get("gap_euclid_mm"),
         "gap_bright_px": gap.get("gap_bright_px"),
         "gap_bright_mm": gap.get("gap_bright_mm"),
-        "mm_per_px": gap["mm_per_px"],
+        "mm_per_px": gap.get("mm_per_px"),
         "step_dy_px": gap.get("step_dy_px"),
+        # 라인 모드(discontinuity) 전용 필드
+        "kind": gap.get("kind"),
+        "jump_px": gap.get("jump_px"),
+        "hole_px": gap.get("hole_px"),
+        "snr": gap.get("snr"),
         "scale": scale_meta,
         "mode": gap.get("mode") or ("roi" if use_roi else "auto"),
-        "left_end": gap["left_end"],
-        "right_end": gap["right_end"],
+        "left_end": gap.get("left_end"),
+        "right_end": gap.get("right_end"),
         "left_end_bright": gap.get("left_end_bright"),
         "right_end_bright": gap.get("right_end_bright"),
-        "left_segment": gap["left_segment"],
-        "right_segment": gap["right_segment"],
-        "segment_count": gap["segment_count"],
-        "segments": gap["segments"],
-        "candidate_count": gap["candidate_count"],
+        "left_segment": gap.get("left_segment"),
+        "right_segment": gap.get("right_segment"),
+        "segment_count": gap.get("segment_count"),
+        "segments": gap.get("segments"),
+        "candidate_count": gap.get("candidate_count"),
         "a_roi": gap.get("a_roi"),
         "b_roi": gap.get("b_roi"),
         "valid_columns": len(points),
         "calibration_file": calib_file,
+        "laser_color": resolved_color,
+        "color_auto": color_auto,
         "image_size": {"width": int(cw), "height": int(ch)},
     }

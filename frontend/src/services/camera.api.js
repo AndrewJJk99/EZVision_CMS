@@ -76,5 +76,19 @@ export const saveCalibration = (cameraIdBackend, force = false) =>
 export const resetCalibrationSamples = (cameraIdBackend) =>
   request(`${CALIBRATION_API}/reset/${cameraIdBackend}`, { method: 'POST' });
 
+// 자동 수집 모드 on/off
+export const setCalibrationAuto = (cameraIdBackend, enabled) =>
+  request(`${CALIBRATION_API}/auto/${cameraIdBackend}`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled: Boolean(enabled) }),
+  });
+
+// 자동 수집 루프 1스텝 (주기 호출)
+export const calibrationAutoTick = (cameraIdBackend) =>
+  request(`${CALIBRATION_API}/auto/tick/${cameraIdBackend}`, {
+    method: 'POST',
+    timeout: 120000,
+  });
+
 export const getCalibrationPreviewUrl = (cameraIdBackend) =>
   `${CALIBRATION_API}/preview/${cameraIdBackend}?t=${Date.now()}`;

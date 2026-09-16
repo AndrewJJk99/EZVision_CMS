@@ -31,13 +31,13 @@ export function useCmsWorkspace() {
   const [laserColor, setLaserColorState] = React.useState(() => {
     try {
       const v = window.localStorage.getItem('cms_laser_color');
-      return v === 'red' || v === 'blue' ? v : 'blue';
+      return v === 'red' || v === 'blue' || v === 'auto' ? v : 'blue';
     } catch (e) {
       return 'blue';
     }
   });
   const setLaserColor = React.useCallback((color) => {
-    const c = color === 'red' ? 'red' : 'blue';
+    const c = color === 'red' ? 'red' : color === 'auto' ? 'auto' : 'blue';
     setLaserColorState(c);
     try {
       window.localStorage.setItem('cms_laser_color', c);

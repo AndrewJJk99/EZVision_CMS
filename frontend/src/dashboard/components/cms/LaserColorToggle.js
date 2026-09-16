@@ -23,6 +23,9 @@ export default function LaserColorToggle({ value, onChange, size = 'small', disa
         }}
         disabled={disabled}
       >
+        <ToggleButton value="auto" sx={{ px: 1.5, fontWeight: 600, '&.Mui-selected': { bgcolor: 'text.primary', color: 'background.paper', '&:hover': { bgcolor: 'text.secondary' } } }}>
+          자동
+        </ToggleButton>
         <ToggleButton value="blue" sx={{ px: 1.5, color: 'primary.main', '&.Mui-selected': { bgcolor: 'primary.main', color: '#fff', '&:hover': { bgcolor: 'primary.dark' } } }}>
           파랑
         </ToggleButton>

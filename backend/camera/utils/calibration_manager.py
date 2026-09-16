@@ -37,6 +37,31 @@ LARGE_PATTERN_CORNER_COUNT = 16  # 4×4 inner 이상
 # 샘플 캡처는 원본 좌표를 저장하되, 코너 "탐색"만 이 크기 이하로 축소해 속도를 확보한다.
 CAPTURE_DETECT_MAX_EDGE_PX = 1280
 
+# ── 자동 캘리브레이션(보드 정지 감지 → 자동 채택) 파라미터
+# 판정은 축소 프리뷰로, 실제 샘플은 원본 grab → add_sample (해상도/정확도 기존과 동일)
+AUTO_MOTION_EPS_PX = 2.0      # 축소본 기준 평균 코너 이동량이 이 이하면 "정지"
+AUTO_STILL_TICKS = 3          # 정지가 이만큼 연속되어야 채택 (모션블러 방지)
+AUTO_COOLDOWN_TICKS = 4       # 채택 후 이만큼은 다시 담지 않음
+AUTO_TARGET_SAMPLES = RECOMMENDED_SAMPLES  # 자동 종료 목표 샘플 수
+AUTO_MIN_ZONES = 6            # 9구역 중 최소 커버 구역 수 (σ가 안 떨어질 때의 상한 보루)
+
+# ── ROS식 4축(X/Y/Size/Skew) 다양성 판정
+# 위치만이 아니라 면외 기울기(skew)까지 다양해야 σ(초점거리·주점)가 떨어진다.
+PARAM_MIN_DIST = 0.18        # 기존 샘플과 4축 L1 거리가 이 이상이어야 "새로운" 포즈로 채택
+XY_GOAL = 0.6                # x, y 커버리지 목표 폭
+SIZE_GOAL = 0.35             # size 커버리지 목표 폭
+SKEW_GOAL = 0.4              # skew 커버리지 목표 폭
+MIN_SKEW_COVERAGE = 0.25     # 자동 종료 전 요구하는 최소 기울기 다양성(정면-only 완료 방지)
+MIN_POS_COVERAGE = 0.4       # 자동 종료 전 요구하는 최소 위치(x·y) 다양성
+
+# ── 증분 재계산 · 파라미터 불확실성(σ) 수렴 종료
+# calibrateCameraExtended의 stdDeviationsIntrinsics로 "얼마나 확신하는가"를 판정한다.
+CONV_FOCAL_REL = 0.003        # σ(fx)/fx, σ(fy)/fy 상대 임계 (0.3%)
+CONV_CENTER_PX = 3.0          # σ(cx), σ(cy) 절대 임계 (px)
+CONV_STABLE_ROUNDS = 2        # 연속 이 횟수 만족해야 수렴 인정
+AUTO_MAX_SAMPLES = 30         # 무한 수집 방지 상한
+AUTO_MIN_ZONES_CONV = 4       # σ 수렴으로 끝낼 때 요구하는 최소 구역 수
+
 
 def undistort_bgr(
     image_bgr: np.ndarray,
@@ -88,10 +113,24 @@ def _solve_calibration(
     distortion_model: str,
     fix_aspect_ratio: bool,
 ):
+    """calibrateCameraExtended — 파라미터 표준편차(σ)와 뷰별 오차를 함께 반환.
+
+    반환: (rms, K, dist, rvecs, tvecs, std_intrinsics, per_view_errors)
+    std_intrinsics 순서: [fx, fy, cx, cy, k1, k2, p1, p2, k3, ...]
+    """
     w, h = image_size
     flags = _calib_flags(distortion_model, fix_aspect_ratio)
     camera_matrix = _initial_camera_matrix((w, h))
-    return cv2.calibrateCamera(
+    (
+        rms,
+        camera_matrix,
+        dist_coeffs,
+        rvecs,
+        tvecs,
+        std_intrinsics,
+        _std_extrinsics,
+        per_view_errors,
+    ) = cv2.calibrateCameraExtended(
         object_points_list,
         image_points_list,
         (w, h),
@@ -99,6 +138,45 @@ def _solve_calibration(
         None,
         flags=flags,
     )
+    per_view = [float(e) for e in np.asarray(per_view_errors).reshape(-1)]
+    std_flat = np.asarray(std_intrinsics, dtype=np.float64).reshape(-1)
+    return rms, camera_matrix, dist_coeffs, rvecs, tvecs, std_flat, per_view
+
+
+def _param_std_dict(std_flat: np.ndarray, camera_matrix: np.ndarray) -> dict:
+    """σ 배열을 이름 있는 dict로 (없으면 None)."""
+    def at(i):
+        return float(std_flat[i]) if std_flat.size > i else None
+
+    fx = float(camera_matrix[0, 0]) or 1.0
+    fy = float(camera_matrix[1, 1]) or 1.0
+    s_fx, s_fy, s_cx, s_cy = at(0), at(1), at(2), at(3)
+    dist_sigmas = [v for v in (at(4), at(5), at(6), at(7), at(8)) if v is not None]
+    return {
+        "fx": None if s_fx is None else round(s_fx, 4),
+        "fy": None if s_fy is None else round(s_fy, 4),
+        "cx": None if s_cx is None else round(s_cx, 4),
+        "cy": None if s_cy is None else round(s_cy, 4),
+        "fx_rel": None if s_fx is None else round(s_fx / abs(fx), 6),
+        "fy_rel": None if s_fy is None else round(s_fy / abs(fy), 6),
+        "dist_max": round(max(dist_sigmas), 6) if dist_sigmas else None,
+    }
+
+
+def _confidence_from_std(param_std: dict) -> float:
+    """σ 임계 대비 달성률(0~1). 가장 부족한 항목이 전체 신뢰도를 결정."""
+    ratios = []
+    for key, limit in (("fx_rel", CONV_FOCAL_REL), ("fy_rel", CONV_FOCAL_REL)):
+        v = param_std.get(key)
+        if v is not None:
+            ratios.append(limit / max(v, 1e-9))
+    for key in ("cx", "cy"):
+        v = param_std.get(key)
+        if v is not None:
+            ratios.append(CONV_CENTER_PX / max(v, 1e-9))
+    if not ratios:
+        return 0.0
+    return float(min(1.0, min(ratios)))
 
 
 def _per_view_reproj_errors(
@@ -174,6 +252,61 @@ def _analyze_sample_quality(
         "tilt_deg": round(tilt_deg, 1),
         "center_px": {"x": round(cx, 1), "y": round(cy, 1)},
         "warnings": warnings,
+    }
+
+
+def _sample_params(
+    corners: np.ndarray,
+    image_size: Tuple[int, int],
+    pattern_size: Tuple[int, int],
+) -> dict:
+    """ROS camera_calibration식 4축 파라미터 (모두 0~1).
+
+    x, y   : 보드 중심 위치 (화면 비율)
+    size   : 보드가 화면에서 차지하는 크기 (√넓이 / √화면넓이)
+    skew   : 면외 기울기(perspective) — 정면이면 0, 기울일수록 큼.
+             σ(초점거리·주점)를 낮추는 핵심 축.
+    """
+    w, h = image_size
+    cols, rows = pattern_size
+    grid = corners.reshape(rows, cols, 2).astype(np.float64)
+    pts = corners.reshape(-1, 2).astype(np.float64)
+
+    cx, cy = float(pts[:, 0].mean()), float(pts[:, 1].mean())
+
+    up_left = grid[0, 0]
+    up_right = grid[0, -1]
+    down_right = grid[-1, -1]
+    down_left = grid[-1, 0]
+
+    # 외곽 사각형 넓이(shoelace) → 크기 축
+    quad = np.array([up_left, up_right, down_right, down_left])
+    area = 0.5 * abs(
+        float(
+            np.dot(quad[:, 0], np.roll(quad[:, 1], -1))
+            - np.dot(quad[:, 1], np.roll(quad[:, 0], -1))
+        )
+    )
+    size = float(np.sqrt(area) / np.sqrt(max(w * h, 1)))
+
+    # up_right 코너의 내각이 90°에서 얼마나 벗어나는가 → 기울기 축
+    def _angle(a, b, c):
+        v1 = a - b
+        v2 = c - b
+        n1 = np.linalg.norm(v1)
+        n2 = np.linalg.norm(v2)
+        if n1 < 1e-6 or n2 < 1e-6:
+            return np.pi / 2.0
+        cosang = float(np.dot(v1, v2) / (n1 * n2))
+        return float(np.arccos(max(-1.0, min(1.0, cosang))))
+
+    skew = min(1.0, 2.0 * abs((np.pi / 2.0) - _angle(up_left, up_right, down_right)))
+
+    return {
+        "x": round(cx / max(w, 1), 4),
+        "y": round(cy / max(h, 1), 4),
+        "size": round(size, 4),
+        "skew": round(skew, 4),
     }
 
 
@@ -273,6 +406,19 @@ class CalibrationSession:
     _preview_miss_count: int = field(default=0, repr=False)
     _last_preview_corners: Optional[np.ndarray] = field(default=None, repr=False)
     last_detection_method: str = ""
+    # ── 자동 모드 상태
+    auto_enabled: bool = False
+    auto_done: bool = False
+    auto_last_reason: str = ""
+    # ── 증분 재계산 / σ 수렴
+    param_std: Optional[dict] = None
+    confidence: float = 0.0
+    converged: bool = False
+    last_calib_at_count: int = 0
+    _conv_rounds: int = field(default=0, repr=False)
+    _auto_prev_corners: Optional[np.ndarray] = field(default=None, repr=False)
+    _auto_still_ticks: int = field(default=0, repr=False)
+    _auto_cooldown: int = field(default=0, repr=False)
 
     @property
     def pattern_size(self) -> Tuple[int, int]:
@@ -457,6 +603,7 @@ class CalibrationSession:
         self.quality_report = None
         self.calib_flags.clear()
         self.image_size = None
+        self.auto_reset()
 
     def quality_guide(self) -> dict:
         pose = _pose_coverage(self._sample_qualities)
@@ -645,6 +792,7 @@ class CalibrationSession:
             }
 
         quality = _analyze_sample_quality(corners, (w, h), self.pattern_size)
+        quality["params"] = _sample_params(corners, (w, h), self.pattern_size)
         self._object_points_list.append(self._object_template())
         self._image_points_list.append(corners)
         self._sample_qualities.append(quality)
@@ -660,6 +808,220 @@ class CalibrationSession:
             "sample_count": self.sample_count,
             "sample_quality": quality,
             "quality_guide": self.quality_guide(),
+        }
+
+    # ------------------------------------------------------------------
+    # 자동 모드: 보드가 "잠깐 멈춘 순간"만 자동 채택
+    # ------------------------------------------------------------------
+    def auto_reset(self):
+        """자동 수집 상태 초기화 (시작/종료/샘플 초기화 시)."""
+        self.auto_done = False
+        self.auto_last_reason = ""
+        self._auto_prev_corners = None
+        self._auto_still_ticks = 0
+        self._auto_cooldown = 0
+        self.converged = False
+        self._conv_rounds = 0
+        self.confidence = 0.0
+        self.param_std = None
+        self.last_calib_at_count = 0
+
+    def mark_auto_accepted(self):
+        """샘플이 실제로 담긴 뒤 호출 — 쿨다운 설정, 정지 카운터 리셋."""
+        self._auto_cooldown = AUTO_COOLDOWN_TICKS
+        self._auto_still_ticks = 0
+
+    def zones_covered(self) -> int:
+        return len({q["zone"] for q in self._sample_qualities if q.get("zone") is not None})
+
+    def _accepted_params(self) -> List[dict]:
+        return [q["params"] for q in self._sample_qualities if q.get("params")]
+
+    def pose_axis_coverage(self) -> dict:
+        """채택 샘플들의 축별 범위(max-min)/goal → {x,y,size,skew} 각 0~1."""
+        params = self._accepted_params()
+        goals = {"x": XY_GOAL, "y": XY_GOAL, "size": SIZE_GOAL, "skew": SKEW_GOAL}
+        cov = {}
+        for axis, goal in goals.items():
+            if len(params) < 2:
+                cov[axis] = 0.0
+                continue
+            vals = [p[axis] for p in params]
+            spread = float(max(vals) - min(vals))
+            cov[axis] = round(min(1.0, spread / max(goal, 1e-6)), 3)
+        return cov
+
+    def _pose_novelty(self, cand: dict) -> Tuple[bool, str]:
+        """후보 포즈가 기존과 충분히 다른가 + 가장 부족한 축 안내.
+
+        반환: (novel, guidance_reason)
+        """
+        params = self._accepted_params()
+        axes = ("x", "y", "size", "skew")
+        if not params:
+            return True, ""
+
+        # 1) 4축 L1 거리 최소값 — 충분히 멀면 새 포즈
+        min_dist = min(
+            sum(abs(cand[a] - p[a]) for a in axes) for p in params
+        )
+        # 2) 어느 축이든 현재 범위를 넓히면 항상 유용 (경계 샘플)
+        expands = False
+        for a in axes:
+            vals = [p[a] for p in params]
+            if cand[a] < min(vals) - 0.03 or cand[a] > max(vals) + 0.03:
+                expands = True
+                break
+        novel = (min_dist > PARAM_MIN_DIST) or expands
+
+        # 안내 축 선정 — 기울기는 σ를 낮추는 핵심이라, 부족하면 최우선 안내
+        cov = self.pose_axis_coverage()
+        if cov.get("skew", 0.0) < MIN_SKEW_COVERAGE:
+            worst = "skew"
+        else:
+            worst = min(cov, key=cov.get)
+        hint = {
+            "skew": "보드를 더 기울이세요 (앞뒤·좌우로)",
+            "size": "거리를 바꿔보세요 (더 가까이/멀리)",
+            "x": "좌우로 더 옮기세요",
+            "y": "위아래로 더 옮기세요",
+        }.get(worst, "다른 자세로 옮기세요")
+        return novel, hint
+
+    def check_converged(self) -> bool:
+        """파라미터 불확실성(σ)이 임계 이하로 안정됐는지 판정.
+
+        연속 CONV_STABLE_ROUNDS회 충족해야 수렴으로 인정한다(일시적 하락 방지).
+        """
+        std = self.param_std or {}
+        fx_rel, fy_rel = std.get("fx_rel"), std.get("fy_rel")
+        s_cx, s_cy = std.get("cx"), std.get("cy")
+        ok = (
+            fx_rel is not None
+            and fy_rel is not None
+            and s_cx is not None
+            and s_cy is not None
+            and fx_rel <= CONV_FOCAL_REL
+            and fy_rel <= CONV_FOCAL_REL
+            and s_cx <= CONV_CENTER_PX
+            and s_cy <= CONV_CENTER_PX
+        )
+        self._conv_rounds = self._conv_rounds + 1 if ok else 0
+        self.converged = self._conv_rounds >= CONV_STABLE_ROUNDS
+        return self.converged
+
+    def auto_ready(self) -> bool:
+        """자동 수집 종료 조건.
+
+        ① σ 수렴 + 최소 샘플·구역 보장 (기본 경로)
+        ② σ가 안 떨어져도 기존 목표(12장·6구역)를 채우면 종료 (상한 보루)
+        ③ 그래도 안 끝나면 최대 샘플에서 강제 종료
+        """
+        cov = self.pose_axis_coverage()
+        pos_ok = cov.get("x", 0.0) >= MIN_POS_COVERAGE and cov.get("y", 0.0) >= MIN_POS_COVERAGE
+        skew_ok = cov.get("skew", 0.0) >= MIN_SKEW_COVERAGE
+        # ① σ 수렴 + 위치·기울기 다양성 (정면-only / 한쪽 치우침 완료 방지)
+        if self.converged and self.sample_count >= MIN_SAMPLES and pos_ok and skew_ok:
+            return True
+        # ② σ가 안 떨어져도 목표 샘플 + 다양성 충족 시 종료
+        if self.sample_count >= AUTO_TARGET_SAMPLES and pos_ok and skew_ok:
+            return True
+        # ③ 무한 방지 상한
+        return self.sample_count >= AUTO_MAX_SAMPLES
+
+    def auto_evaluate(self, preview_bgr: np.ndarray) -> dict:
+        """축소 프리뷰 1프레임으로 '지금 담을지'를 판정 (카메라 I/O 없음).
+
+        실제 샘플은 호출부가 원본을 다시 grab해 add_sample로 담는다.
+        """
+        found, corners, annotated = self.detect_corners(
+            preview_bgr, stabilize_preview=True
+        )
+        result = {
+            "detected": bool(found),
+            "accept": False,
+            "still_ticks": self._auto_still_ticks,
+            "motion_px": None,
+            "zone": None,
+            "reason": "",
+            "annotated": annotated,
+        }
+        if self._auto_cooldown > 0:
+            self._auto_cooldown -= 1
+
+        if not found or corners is None:
+            self._auto_still_ticks = 0
+            self._auto_prev_corners = None
+            result["still_ticks"] = 0
+            result["reason"] = "보드 미검출"
+            self.auto_last_reason = result["reason"]
+            return result
+
+        pts = corners.reshape(-1, 2).astype(np.float64)
+        # 1) 정지 판정 — 이전 프레임 대비 평균 코너 이동량
+        motion = None
+        if (
+            self._auto_prev_corners is not None
+            and self._auto_prev_corners.shape == pts.shape
+        ):
+            motion = float(np.mean(np.linalg.norm(pts - self._auto_prev_corners, axis=1)))
+            if motion <= AUTO_MOTION_EPS_PX:
+                self._auto_still_ticks += 1
+            else:
+                self._auto_still_ticks = 0
+        else:
+            self._auto_still_ticks = 0
+        self._auto_prev_corners = pts
+        result["motion_px"] = None if motion is None else round(motion, 2)
+        result["still_ticks"] = self._auto_still_ticks
+
+        # 2) 위치·크기·품질 + 4축(X/Y/Size/Skew) 다양성 판정
+        #    (축소본 기준 — 모두 화면 비율/각도라 원본과 동일)
+        h, w = preview_bgr.shape[:2]
+        quality = _analyze_sample_quality(corners, (w, h), self.pattern_size)
+        params = _sample_params(corners, (w, h), self.pattern_size)
+        result["zone"] = quality.get("zone")
+        result["skew"] = params["skew"]
+
+        quality_ok = float(quality.get("coverage") or 0.0) >= MIN_BOARD_COVERAGE
+        novel, novelty_hint = self._pose_novelty(params)
+
+        # 3) 최종 채택 판정
+        if self._auto_still_ticks < AUTO_STILL_TICKS:
+            result["reason"] = "이동 감지 — 보드를 잠시 멈추세요"
+        elif self._auto_cooldown > 0:
+            result["reason"] = "직전 샘플 후 대기 중"
+        elif not quality_ok:
+            result["reason"] = "보드가 화면 대비 너무 작습니다"
+        elif not novel:
+            result["reason"] = f"비슷한 자세 — {novelty_hint}"
+        else:
+            result["accept"] = True
+            result["reason"] = "정지 확인 — 샘플 채택"
+
+        self.auto_last_reason = result["reason"]
+        return result
+
+    def auto_state(self) -> dict:
+        """상태 응답용 자동 모드 요약."""
+        return {
+            "enabled": self.auto_enabled,
+            "done": self.auto_done,
+            "reason": self.auto_last_reason,
+            "still_ticks": self._auto_still_ticks,
+            "cooldown": self._auto_cooldown,
+            "sample_count": self.sample_count,
+            "target_samples": AUTO_TARGET_SAMPLES,
+            "max_samples": AUTO_MAX_SAMPLES,
+            "zones_covered": self.zones_covered(),
+            "axis_coverage": self.pose_axis_coverage(),
+            "min_skew_coverage": MIN_SKEW_COVERAGE,
+            "min_pos_coverage": MIN_POS_COVERAGE,
+            "ready": self.auto_ready(),
+            "confidence": round(self.confidence, 3),
+            "converged": self.converged,
+            "param_std": self.param_std,
+            "rms_error": self.rms_error,
         }
 
     def run_calibration(self) -> dict:
@@ -681,10 +1043,9 @@ class CalibrationSession:
         obj_all = self._object_points_list
         img_all = self._image_points_list
 
-        rms, camera_matrix, dist_coeffs, rvecs, tvecs = _solve_calibration(
+        rms, camera_matrix, dist_coeffs, rvecs, tvecs, std_flat, per_view = _solve_calibration(
             obj_all, img_all, (w, h), model, self.config.fix_aspect_ratio
         )
-        per_view = _per_view_reproj_errors(obj_all, img_all, camera_matrix, dist_coeffs, rvecs, tvecs)
         all_per_view = list(per_view)
         excluded = _outlier_indices(per_view, MIN_SAMPLES)
 
@@ -692,11 +1053,8 @@ class CalibrationSession:
             keep = [i for i in range(len(obj_all)) if i not in excluded]
             obj_kept = [obj_all[i] for i in keep]
             img_kept = [img_all[i] for i in keep]
-            rms, camera_matrix, dist_coeffs, rvecs, tvecs = _solve_calibration(
+            rms, camera_matrix, dist_coeffs, rvecs, tvecs, std_flat, per_view = _solve_calibration(
                 obj_kept, img_kept, (w, h), model, self.config.fix_aspect_ratio
-            )
-            per_view = _per_view_reproj_errors(
-                obj_kept, img_kept, camera_matrix, dist_coeffs, rvecs, tvecs
             )
             excluded_map = excluded
         else:
@@ -708,6 +1066,10 @@ class CalibrationSession:
         self.rms_error = float(rms)
         self.per_view_errors = per_view
         self.excluded_sample_indices = excluded_map
+        # 파라미터 불확실성(σ)과 신뢰도 — 증분 재계산 시 게이지/수렴 판정에 사용
+        self.param_std = _param_std_dict(std_flat, camera_matrix)
+        self.confidence = _confidence_from_std(self.param_std)
+        self.last_calib_at_count = self.sample_count
 
         pose_cov = _pose_coverage(self._sample_qualities)
         self.quality_report = _assess_quality(
@@ -718,6 +1080,8 @@ class CalibrationSession:
             pose_cov,
             excluded_map,
         )
+        self.quality_report["param_std"] = self.param_std
+        self.quality_report["confidence"] = round(self.confidence, 3)
 
         fx, fy = camera_matrix[0, 0], camera_matrix[1, 1]
         cx, cy = camera_matrix[0, 2], camera_matrix[1, 2]
@@ -744,6 +1108,9 @@ class CalibrationSession:
             "calib_flags": self.calib_flags,
             "quality_report": self.quality_report,
             "quality_guide": self.quality_guide(),
+            "param_std": self.param_std,
+            "confidence": round(self.confidence, 3),
+            "converged": self.converged,
         }
 
     def save(self, base_dir: str, force: bool = False) -> str:
@@ -815,12 +1182,15 @@ class CalibrationManager:
         session.reset_samples()
         session._preview_miss_count = 0
         session._last_preview_corners = None
+        session.auto_enabled = False
         session.last_message = "캘리브레이션 모드 시작"
         return session
 
     def stop(self, camera_id: int) -> CalibrationSession:
         session = self.get_session(camera_id)
         session.active = False
+        session.auto_enabled = False
+        session.auto_reset()
         session.last_message = "캘리브레이션 모드 종료"
         return session
 

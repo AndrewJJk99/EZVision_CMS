@@ -682,6 +682,56 @@ def _robust_blue_response(undistorted_bgr: np.ndarray) -> np.ndarray:
     return _robust_laser_response(undistorted_bgr, "blue")
 
 
+# ── 라인 모드(차체 반사 대응) 검출 상수
+# 블랙 유광 도장은 거울처럼 주변(작업자·흰 구조물·조명)을 반사한다. 반사는 색이
+# 중성(R≈G≈B)이라 색차가 0에 가깝고, 레이저는 단색이라 색차가 크다. 밝기 성분 없이
+# 색차(chroma)만 쓰면 반사가 원리적으로 배제된다. 라인 차체 레이저는 포화되어도
+# bloom이 얇으므로 커널을 작게 쓴다.
+CHROMA_KERNEL_H = 41       # 세로 top-hat 커널 (얇은 라인 레이저)
+CHROMA_FLOOR = 45.0        # 색차 절대 하한 — 중성(흰/회색) 반사 제거
+CHROMA_RESP_THR = 20.0     # top-hat 응답 고정 임계
+
+
+def _chroma_laser_response(undistorted_bgr: np.ndarray, laser_color: str = "red") -> np.ndarray:
+    """색 순도(chroma) 전용 응답 — 라인 모드(차체 반사 배제)용.
+
+    밝기 성분을 쓰지 않으므로 흰 하이라이트 반사가 응답에 잡히지 않는다.
+    """
+    color = (laser_color or "red").lower()
+    bgr = undistorted_bgr.astype(np.float32)
+    b, g, r = cv2.split(bgr)
+    if color == "red":
+        main, o1, o2 = r, g, b
+    else:
+        main, o1, o2 = b, g, r
+
+    # 두 가지 색차의 최소값 = '순수한 단색' 정도 (탁한 색·중성색은 작아짐)
+    pure = np.minimum(
+        np.maximum(main - np.maximum(o1, o2), 0.0),
+        np.maximum(main - 0.5 * (o1 + o2), 0.0),
+    )
+    pure = np.where(pure >= CHROMA_FLOOR, pure, 0.0)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, CHROMA_KERNEL_H))
+    resp = cv2.morphologyEx(
+        np.clip(pure, 0, 255).astype(np.uint8), cv2.MORPH_TOPHAT, kernel
+    ).astype(np.float32)
+    return cv2.GaussianBlur(resp, (1, 3), 0)
+
+
+def _chroma_response_mask(response: np.ndarray) -> Tuple[np.ndarray, float]:
+    """chroma 응답 → 고정 임계 마스크 (배경이 0에 수렴하므로 Otsu 불필요)."""
+    thr = CHROMA_RESP_THR
+    mask = (response >= thr).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(
+        mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_RECT, (9, 1))
+    )
+    mask = cv2.morphologyEx(
+        mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_RECT, (31, 1))
+    )
+    return mask, float(thr)
+
+
 def _automatic_response_mask(response: np.ndarray) -> Tuple[np.ndarray, float]:
     """희소한 레이저 응답에서 장면별 임계값을 자동 결정."""
     finite = response[np.isfinite(response)]
@@ -1022,18 +1072,27 @@ def detect_laser_profile(
     preserve_gaps: bool = False,
     return_quality: bool = False,
     laser_color: str = "blue",
+    detector: str = "ridge",
     **_legacy_options,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """단일 강건 자동 검출기.
 
     색상 임계값이나 SNR을 사용자가 조절하지 않는다. laser_color("blue"|"red")에
     맞는 선형 응답을 자동 임계화하고, 수평으로 충분히 긴 연결요소만 프로파일로 변환한다.
+
+    detector:
+      "ridge"  — 기본(실험실 근거리·포화 레이저). 색차+밝기+포화코어 결합 응답.
+      "chroma" — 라인 모드(차체 반사 대응). 색차 전용 응답으로 흰 반사를 배제.
     """
     if undistorted_bgr is None or undistorted_bgr.size == 0:
         raise ValueError("레이저 검출 이미지가 없습니다")
 
     color = (laser_color or "blue").lower()
-    response = _robust_laser_response(undistorted_bgr, color)
+    det = (detector or "ridge").lower()
+    if det == "chroma":
+        response = _chroma_laser_response(undistorted_bgr, color)
+    else:
+        response = _robust_laser_response(undistorted_bgr, color)
     h, w = response.shape
     if roi_y0 is not None or roi_y1 is not None:
         y0 = 0 if roi_y0 is None else max(0, min(int(roi_y0), h))
@@ -1043,7 +1102,10 @@ def detect_laser_profile(
             roi[y0:y1, :] = response[y0:y1, :]
         response = roi
 
-    raw_mask, threshold = _automatic_response_mask(response)
+    if det == "chroma":
+        raw_mask, threshold = _chroma_response_mask(response)
+    else:
+        raw_mask, threshold = _automatic_response_mask(response)
     # 서브픽셀 추출은 원본 밝기 코어를 사용한다. 굵은 코어의 '중간값'은
     # 임계 교차 중점으로 계산한다. 우세 채널은 레이저 색을 따른다.
     b = undistorted_bgr[:, :, 0].astype(np.float64)
@@ -1065,7 +1127,7 @@ def detect_laser_profile(
     if return_quality:
         valid = int(np.count_nonzero(~np.isnan(profile)))
         quality = {
-            "detector": f"robust_{color}_ridge_v2",
+            "detector": f"{color}_{det}",
             "laser_color": color,
             "coverage": round(valid / max(1, w), 3),
             "valid_after_continuity": valid,
@@ -1799,6 +1861,23 @@ def _keep_top_lines(mask: np.ndarray, bridge_gap: int = 1, top_n: int = 2) -> np
     return keep
 
 
+def detect_laser_color(image_bgr: np.ndarray) -> str:
+    """레이저 색 자동 판정 — 빨강 우세/파랑 우세 색차의 상위 분위를 비교한다.
+
+    r - max(g, b) 와 b - max(g, r) 의 99.9 분위를 비교한다. 레이저 코어처럼
+    특정 색이 포화된 소수 픽셀이 판정을 좌우하도록 상위 분위를 쓴다.
+    반환: "red" | "blue" (판정 불가 시 "blue").
+    """
+    if image_bgr is None or image_bgr.ndim != 3 or image_bgr.shape[2] < 3:
+        return "blue"
+    b = image_bgr[:, :, 0].astype(np.float64)
+    g = image_bgr[:, :, 1].astype(np.float64)
+    r = image_bgr[:, :, 2].astype(np.float64)
+    red_score = float(np.percentile(np.maximum(r - np.maximum(g, b), 0), 99.9))
+    blue_score = float(np.percentile(np.maximum(b - np.maximum(g, r), 0), 99.9))
+    return "red" if red_score > blue_score else "blue"
+
+
 def detect_laser_profile_for_gap(
     undistorted_bgr: np.ndarray,
     **kwargs,
@@ -1957,6 +2036,122 @@ def _facing_dy(left: dict, right: dict, n: int = 8) -> float:
     ly = float(np.median(left["ys"][-n:]))
     ry = float(np.median(right["ys"][:n]))
     return abs(ry - ly)
+
+
+# ── 라인 모드 엣지: 프로파일의 '가장 확실한 불연속' 하나를 찾는다
+EDGE_MIN_HOLE = 4          # 의미 있는 NaN 구멍(px)
+EDGE_NOISE_MULT = 8.0      # 잡음(p95) 대비 이만큼 커야 진짜 불연속
+EDGE_MIN_JUMP = 3.0        # 최소 y 점프(px)
+EDGE_MED = 7              # 엣지 y는 끝쪽 이만큼의 중앙값
+DEFAULT_EDGE_END_MARGIN_PX = 180  # 레이저 양끝 산란 번짐(bloom) 제외 폭(px)
+EDGE_CORE_MIN = 50         # 마진 적용 후 최소 코어 점 수(미만이면 전체 사용)
+
+
+def measure_edge_from_profile(
+    profile: np.ndarray,
+    mm_per_px: Optional[float] = None,
+    end_margin_px: int = DEFAULT_EDGE_END_MARGIN_PX,
+) -> Tuple[Optional[dict], Optional[str]]:
+    """라인 모드 — 매끄러운 프로파일에서 패널 이음부(최대 불연속)를 찾는다.
+
+    레이저가 매끄럽게 잡히면(라인 모드) 이음부는 잡음 대비 압도적인 불연속으로
+    드러난다. y 점프(단차) 또는 NaN 구멍(레이저 끊김)을 후보로, 인접 후보를 묶어
+    가장 강한 하나를 골라 양쪽 끝점을 엣지로 반환한다.
+
+    레이저가 사라지는 양끝에서는 코너를 감싸는 강한 산란 번짐(bloom)으로 큰 가짜
+    점프가 생긴다. `end_margin_px` 만큼 양끝을 후보 탐색에서 제외해 진짜 이음부만
+    남긴다. (잡음 추정·끝점 y 계산은 전체 구간을 그대로 쓴다.)
+    """
+    if profile is None or len(profile) < 100:
+        return None, "레이저 프로파일이 없습니다"
+
+    prof = np.asarray(profile, dtype=np.float64)
+    v = ~np.isnan(prof)
+    idx = np.flatnonzero(v)
+    if idx.size < 100:
+        return None, "유효 레이저 점이 너무 적습니다"
+
+    ys = prof[idx]
+    noise = float(np.percentile(np.abs(np.diff(ys)), 95)) or 0.05
+    jump_thr = max(EDGE_MIN_JUMP, EDGE_NOISE_MULT * noise)
+
+    # 양끝 산란 번짐(bloom) 제외 — 후보 탐색은 코어 구간에서만.
+    margin = max(0, int(end_margin_px))
+    core = idx
+    if margin > 0:
+        xlo = int(idx.min()) + margin
+        xhi = int(idx.max()) - margin
+        trimmed = idx[(idx >= xlo) & (idx <= xhi)]
+        # 마진 적용 후 코어가 너무 짧으면(짧은 레이저·저해상도) 전체 구간 폴백.
+        if trimmed.size >= EDGE_CORE_MIN:
+            core = trimmed
+        else:
+            margin = 0
+
+    cdy = np.abs(np.diff(prof[core]))
+    cdx = np.diff(core)
+    cands = []
+    for k in range(len(cdy)):
+        jump = float(cdy[k])
+        hole = int(cdx[k]) - 1
+        if jump >= jump_thr or hole >= EDGE_MIN_HOLE:
+            # NaN 구멍(레이저가 갭 속으로 사라짐)은 y점프보다 훨씬 신뢰도 높은 이음부
+            # 신호다. 구멍 가중을 크게 줘, 배경 반사로 생긴 작은 y점프가 진짜 갭을
+            # 이기지 못하게 한다. 구멍이 하나도 없을 때만 y점프가 판정을 좌우한다.
+            cands.append({"x_left": int(core[k]), "x_right": int(core[k + 1]),
+                          "jump": jump, "hole": hole,
+                          "score": 100.0 * hole + jump})
+    if not cands:
+        return None, "명확한 불연속(이음부)을 찾지 못했습니다"
+
+    # 인접 후보(60px 이내)는 같은 이음부 → 묶어서 가장 강한 그룹 선택
+    cands.sort(key=lambda c: c["x_left"])
+    groups, cur = [], [cands[0]]
+    for c in cands[1:]:
+        if c["x_left"] - cur[-1]["x_right"] <= 60:
+            cur.append(c)
+        else:
+            groups.append(cur)
+            cur = [c]
+    groups.append(cur)
+    best = max(groups, key=lambda g: sum(c["score"] for c in g))
+
+    xl = min(c["x_left"] for c in best)
+    xr = max(c["x_right"] for c in best)
+    jump = max(c["jump"] for c in best)
+    hole = max(c["hole"] for c in best)
+
+    left_pts = idx[idx <= xl][-EDGE_MED:]
+    right_pts = idx[idx >= xr][:EDGE_MED]
+    if left_pts.size == 0 or right_pts.size == 0:
+        return None, "엣지 끝점 확정 실패"
+
+    ly = float(np.median(prof[left_pts]))
+    ry = float(np.median(prof[right_pts]))
+    gap_px = float(xr - xl)
+    step_dy_px = abs(ry - ly)
+    kind = "hole" if hole >= EDGE_MIN_HOLE else "step"
+
+    scale = None if mm_per_px is None else float(mm_per_px)
+    gap_mm = round(gap_px * scale, 4) if (scale and scale > 0) else None
+
+    result = {
+        "mode": "discontinuity",
+        "kind": kind,
+        "left_end": {"x": round(float(xl), 2), "y": round(ly, 2)},
+        "right_end": {"x": round(float(xr), 2), "y": round(ry, 2)},
+        "gap_px": round(gap_px, 2),
+        "gap_mm": gap_mm,
+        "step_dy_px": round(step_dy_px, 2),
+        "jump_px": round(jump, 2),
+        "hole_px": int(hole),
+        "noise_px": round(noise, 3),
+        "snr": round(jump / max(noise, 1e-6), 1),
+        "mm_per_px": scale,
+        "valid_columns": int(idx.size),
+        "end_margin_px": int(margin),
+    }
+    return result, None
 
 
 def _column_peak(intensity: np.ndarray, profile: np.ndarray, x: int, half: int = 25) -> float:

@@ -1,0 +1,109 @@
+{
+  "camera_id": 1,
+  "ui_camera_id": 2,
+  "method": "Zhang (OpenCV calibrateCamera)",
+  "distortion_model": "brown5",
+  "calib_flags": [
+    "USE_INTRINSIC_GUESS",
+    "FIX_ASPECT_RATIO"
+  ],
+  "fix_aspect_ratio": true,
+  "pattern_inner_corners": [
+    12,
+    8
+  ],
+  "square_size_mm": 20.0,
+  "sample_count": 8,
+  "rms_error": 0.46011703471579135,
+  "per_view_errors": [
+    0.9905902486190493,
+    0.3654405351351413,
+    0.23260041354687866,
+    0.48303503021680966,
+    0.3718666784168788,
+    0.2344038089582042,
+    0.2064227539059087,
+    0.23575313657821068
+  ],
+  "excluded_sample_indices": [],
+  "camera_matrix": [
+    [
+      4565.234621670089,
+      0.0,
+      2191.545572745757
+    ],
+    [
+      0.0,
+      4565.234621670089,
+      1484.5514542420435
+    ],
+    [
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "dist_coeffs": [
+    -0.055912078027851295,
+    0.11080681503712443,
+    0.0018342306913846083,
+    -0.0016843961204640737,
+    0.00614012356026406
+  ],
+  "image_size": {
+    "width": 4096,
+    "height": 3000
+  },
+  "quality": {
+    "pass": false,
+    "level": "fail",
+    "rms_px": 0.4601,
+    "max_per_view_px": 0.9906,
+    "fx_fy_ratio": 1.0,
+    "excluded_samples": [],
+    "excluded_count": 0,
+    "pose_coverage": {
+      "zones_covered": 5,
+      "zones_total": 9,
+      "ratio": 0.56,
+      "missing_hint": "9구역 중 5/9 커버"
+    },
+    "issues": [
+      "RMS 0.460px > 권장 0.35px",
+      "최대 뷰 오차 0.991px > 0.5px",
+      "샘플 8장 (권장 12+)"
+    ],
+    "param_std": {
+      "fx": 0.0,
+      "fy": 30.6963,
+      "cx": 5.1631,
+      "cy": 9.0204,
+      "fx_rel": 0.0,
+      "fy_rel": 0.006724,
+      "dist_max": 0.095249
+    },
+    "confidence": 0.333
+  },
+  "saved_at": "20260828_112637",
+  "npz_path": "C:\\code\\local_repo\\EZVision_CMS\\backend\\camera\\calibration_data\\camera_1_calib_20260828_112637.npz",
+  "plane_scale": {
+    "mm_per_px": 0.18324438,
+    "mm_per_px_x": 0.18218604,
+    "mm_per_px_y": 0.18393288,
+    "square_px": 109.1439,
+    "square_px_x": 109.7779,
+    "square_px_y": 108.7353,
+    "square_size_mm": 20.0,
+    "inner_cols": 12,
+    "inner_rows": 8,
+    "calibration_file": "camera_1_calib_20260828_112637.json",
+    "image_size": {
+      "width": 4096,
+      "height": 3000
+    },
+    "formula": "mm_per_px = square_size_mm / square_px",
+    "source": "median of undistorted cali*.bmp",
+    "n_images": 15,
+    "saved_at": "20260828_112703"
+  }
+}

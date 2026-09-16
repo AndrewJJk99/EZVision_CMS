@@ -1,0 +1,21 @@
+{
+  "mm_per_px": 0.18324438,
+  "mm_per_px_x": 0.18218604,
+  "mm_per_px_y": 0.18393288,
+  "square_px": 109.1439,
+  "square_px_x": 109.7779,
+  "square_px_y": 108.7353,
+  "square_size_mm": 20.0,
+  "inner_cols": 12,
+  "inner_rows": 8,
+  "calibration_file": "camera_1_calib_20260828_112637.json",
+  "image_size": {
+    "width": 4096,
+    "height": 3000
+  },
+  "formula": "mm_per_px = square_size_mm / square_px",
+  "source": "median of undistorted cali*.bmp",
+  "n_images": 15,
+  "camera_id": 1,
+  "saved_at": "20260828_112703"
+}
