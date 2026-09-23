@@ -3,17 +3,15 @@ import { alpha } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
-import CameraGrid from './components/CameraGrid';
-import LutGrid from './components/LutGrid';
-import MeasurementGrid from './components/MeasurementGrid';
 import SettingsGrid from './components/SettingsGrid';
+import LaserPlaneGrid from './components/LaserPlaneGrid';
 import SideMenu from './components/SideMenu/SideMenu';
 import AppTheme from '../shared-theme/AppTheme';
 import { CameraAppProvider } from './context/CameraAppContext';
 import { PageNavProvider, PAGES, pageToPath, pathToPage } from './context/PageNavContext';
 
 function readInitialPage() {
-  if (typeof window === 'undefined') return 'calibration';
+  if (typeof window === 'undefined') return 'cms';
   return pathToPage(window.location.pathname);
 }
 
@@ -22,7 +20,7 @@ export default function Dashboard() {
   const [page, setPage] = React.useState(readInitialPage);
 
   const goTo = React.useCallback((nextPage) => {
-    const target = PAGES.includes(nextPage) ? nextPage : 'calibration';
+    const target = PAGES.includes(nextPage) ? nextPage : 'cms';
     setPage(target);
     const path = pageToPath(target);
     if (window.location.pathname !== path) {
@@ -46,36 +44,19 @@ export default function Dashboard() {
                   ? `rgba(${theme.vars.palette.background.defaultChannel} / 1)`
                   : alpha(theme.palette.background.default, 1),
                 overflowX: 'hidden',
-                overflowY: page === 'lut' || page === 'measurement' ? 'hidden' : 'auto',
-                display: page === 'lut' || page === 'measurement' ? 'flex' : 'block',
-                flexDirection: 'column',
-                height: page === 'lut' || page === 'measurement' ? '100vh' : undefined,
+                overflowY: 'auto',
+                display: 'block',
                 px: { xs: 1.5, md: 3 },
-                pb: page === 'lut' || page === 'measurement' ? { xs: 1.5, md: 2 } : 5,
+                pb: 5,
                 pt: { xs: 1, md: 2 },
                 boxSizing: 'border-box',
               })}
             >
-              <Stack
-                spacing={1}
-                sx={{
-                  alignItems: 'stretch',
-                  minWidth: 0,
-                  maxWidth: '100%',
-                  boxSizing: 'border-box',
-                  ...(page === 'lut' || page === 'measurement'
-                    ? { flex: 1, minHeight: 0, overflow: 'hidden' }
-                    : {}),
-                }}
-              >
+              <Stack spacing={1} sx={{ alignItems: 'stretch', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box' }}>
                 {page === 'settings' ? (
                   <SettingsGrid key="settings-page" />
-                ) : page === 'lut' ? (
-                  <LutGrid key="lut-page" />
-                ) : page === 'measurement' ? (
-                  <MeasurementGrid key="measurement-page" />
                 ) : (
-                  <CameraGrid key="calibration-page" />
+                  <LaserPlaneGrid key="cms-page" />
                 )}
               </Stack>
             </Box>

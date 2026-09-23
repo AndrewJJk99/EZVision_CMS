@@ -110,8 +110,8 @@ export default function SideMenu({ open = true, onToggle }) {
             overflow: 'hidden',
             width: open ? 'auto' : 0,
           }}
-        >          
-          EZVision CMS
+        >
+          EZVision_AI
         </Typography>
         
       </Box>

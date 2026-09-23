@@ -34,6 +34,11 @@ export const restartCamera = () =>
     method: 'POST',
   });
 
+export const startCamera = () =>
+  request(`${CAMERA_API}/start`, {
+    method: 'POST',
+  });
+
 export const setCameraFeature = (cameraId, payload) =>
   request(`${CAMERA_API}/set_feature/${cameraId}`, {
     method: 'POST',
@@ -41,54 +46,3 @@ export const setCameraFeature = (cameraId, payload) =>
   });
 
 export const getCameraWsUrl = (cameraId) => `${CAMERA_WS_BASE}/camera/ws/${cameraId}`;
-
-const CALIBRATION_API = `${API.camera}/calibration`;
-
-export const getCalibrationStatus = (cameraIdBackend) =>
-  request(`${CALIBRATION_API}/status/${cameraIdBackend}`);
-
-export const startCalibration = (cameraIdBackend, config) =>
-  request(`${CALIBRATION_API}/start/${cameraIdBackend}`, {
-    method: 'POST',
-    body: JSON.stringify(config || {}),
-  });
-
-export const stopCalibration = (cameraIdBackend) =>
-  request(`${CALIBRATION_API}/stop/${cameraIdBackend}`, { method: 'POST' });
-
-export const captureCalibrationSample = (cameraIdBackend) =>
-  request(`${CALIBRATION_API}/capture/${cameraIdBackend}`, {
-    method: 'POST',
-    timeout: 120000,
-  });
-
-export const runCalibration = (cameraIdBackend) =>
-  request(`${CALIBRATION_API}/run/${cameraIdBackend}`, {
-    method: 'POST',
-    timeout: 60000,
-  });
-
-export const saveCalibration = (cameraIdBackend, force = false) =>
-  request(`${CALIBRATION_API}/save/${cameraIdBackend}?force=${force ? 'true' : 'false'}`, {
-    method: 'POST',
-  });
-
-export const resetCalibrationSamples = (cameraIdBackend) =>
-  request(`${CALIBRATION_API}/reset/${cameraIdBackend}`, { method: 'POST' });
-
-// 자동 수집 모드 on/off
-export const setCalibrationAuto = (cameraIdBackend, enabled) =>
-  request(`${CALIBRATION_API}/auto/${cameraIdBackend}`, {
-    method: 'POST',
-    body: JSON.stringify({ enabled: Boolean(enabled) }),
-  });
-
-// 자동 수집 루프 1스텝 (주기 호출)
-export const calibrationAutoTick = (cameraIdBackend) =>
-  request(`${CALIBRATION_API}/auto/tick/${cameraIdBackend}`, {
-    method: 'POST',
-    timeout: 120000,
-  });
-
-export const getCalibrationPreviewUrl = (cameraIdBackend) =>
-  `${CALIBRATION_API}/preview/${cameraIdBackend}?t=${Date.now()}`;

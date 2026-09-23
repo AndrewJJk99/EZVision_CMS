@@ -26,12 +26,14 @@ export const request = async (url, options = {}) => {
   const timeoutMs = options.timeout ?? DEFAULT_TIMEOUT_MS;
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData;
   try {
     const response = await fetch(url, {
       ...options,
       signal: controller.signal,
       headers: {
-        'Content-Type': 'application/json',
+        // FormData는 브라우저가 multipart boundary를 직접 설정해야 하므로 Content-Type 미설정
+        ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
         ...(options.headers || {}),
       },
     });

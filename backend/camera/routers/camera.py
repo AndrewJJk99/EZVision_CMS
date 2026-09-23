@@ -5,14 +5,16 @@ sys.path.append(project_path)
 
 import asyncio
 import httpx
+import cv2
+import numpy as np
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from datetime import datetime
 from utils.camera_grab_v2 import (
     get_feature, set_feature, get_camera_status, get_device_list,
     start_grabbing, stop_grabbing, get_frame, get_frame_save, save_image, cameragrab,
-    get_last_saved_path,
+    get_last_saved_path, get_frame_bgr,
     STREAM_DISPLAY_WIDTH, STREAM_DISPLAY_HEIGHT,
 )
 from schemas import CameraFeatureRequest
@@ -353,6 +355,26 @@ async def get_status(camera_id: int = None):
             status_code=500,
             content={"error": f"Failed to get camera status: {str(e)}"}
         )
+
+@router.get("/frame/{camera_id}")
+async def get_full_frame(camera_id: int):
+    """원본 해상도 프레임 1장을 PNG로 반환 — CMS 서버가 캘리브·측정에 사용.
+
+    camera_id: 0~3 (backend 인덱스). PNG(무손실)로 인코딩해 캘리브 정밀도를 보존한다.
+    """
+    if camera_id < 0 or camera_id >= 4:
+        return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
+    try:
+        img = await get_frame_bgr(camera_id)
+        if img is None:
+            return JSONResponse(status_code=503, content={"error": "No frame available"})
+        ok, buf = cv2.imencode(".png", img)
+        if not ok:
+            return JSONResponse(status_code=500, content={"error": "Encode failed"})
+        return Response(content=buf.tobytes(), media_type="image/png")
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": f"Frame fetch failed: {str(e)}"})
+
 
 @router.get("/devices")
 async def get_devices():

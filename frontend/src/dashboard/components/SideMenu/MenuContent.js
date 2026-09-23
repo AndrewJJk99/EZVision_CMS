@@ -5,16 +5,12 @@ import ListItemButton from '@mui/material/ListItemButton';
 import ListItemIcon from '@mui/material/ListItemIcon';
 import ListItemText from '@mui/material/ListItemText';
 import Stack from '@mui/material/Stack';
-import CameraIcon from '@mui/icons-material/Camera';
-import StraightenIcon from '@mui/icons-material/Straighten';
-import SquareFootIcon from '@mui/icons-material/SquareFoot';
+import ViewInArRoundedIcon from '@mui/icons-material/ViewInArRounded';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import { usePageNav } from '../../context/PageNavContext';
 
 const mainListItems = [
-  { text: 'Calibration', icon: <CameraIcon />, page: 'calibration' },
-  { text: 'LUT', icon: <StraightenIcon />, page: 'lut' },
-  { text: '측정', icon: <SquareFootIcon />, page: 'measurement' },
+  { text: 'CMS', icon: <ViewInArRoundedIcon />, page: 'cms' },
   { text: 'Settings', icon: <SettingsRoundedIcon />, page: 'settings' },
 ];
 
@@ -34,26 +30,13 @@ export default function MenuContent({ open = true }) {
                 minHeight: 36,
                 py: 0.5,
                 px: open ? 1.5 : 0.5,
-                '&.Mui-selected': {
-                  backgroundColor: 'rgba(0, 0, 0, 0.08)',
-                },
+                '&.Mui-selected': { backgroundColor: 'rgba(0, 0, 0, 0.08)' },
               }}
             >
-              <ListItemIcon
-                sx={{
-                  minWidth: open ? 36 : 0,
-                  justifyContent: 'center',
-                }}
-              >
+              <ListItemIcon sx={{ minWidth: open ? 36 : 0, justifyContent: 'center' }}>
                 {item.icon}
               </ListItemIcon>
-              <ListItemText
-                primary={item.text}
-                sx={{
-                  opacity: open ? 1 : 0,
-                  transition: 'opacity 0.2s',
-                }}
-              />
+              <ListItemText primary={item.text} sx={{ opacity: open ? 1 : 0, transition: 'opacity 0.2s' }} />
             </ListItemButton>
           </ListItem>
         ))}

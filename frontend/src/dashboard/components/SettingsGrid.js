@@ -3,7 +3,7 @@ import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import Alert from '@mui/material/Alert';
-import CameraControl3 from './CameraGrid/components/CameraControls/CameraControl3';
+import CameraControl3 from './CameraControl3';
 import { getCameraStatus } from '../../services/camera.api';
 
 export default function SettingsGrid() {
