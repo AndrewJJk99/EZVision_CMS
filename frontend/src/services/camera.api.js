@@ -22,6 +22,25 @@ export const getCameraStatus = (cameraId) => {
   return request(`${CAMERA_API}/status${query}`);
 };
 
+/**
+ * 실제 연결/매핑된 카메라 목록을 백엔드 상태에서 동적으로 조회.
+ * 반환: [{ backend, ui, ip, connected }] — 연결(has_camera) 또는 매핑(db_ip)된 슬롯만.
+ * 카메라가 추가/매핑되면 재조회 시 자동으로 목록에 나타난다.
+ */
+export const getAvailableCameras = async () => {
+  const res = await getCameraStatus();
+  const list = res?.status?.cameras;
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((c) => c && (c.has_camera || c.db_ip))
+    .map((c) => ({
+      backend: c.camera_id,
+      ui: c.ui_camera_id ?? c.camera_id + 1,
+      ip: c.device_ip || c.db_ip || null,
+      connected: !!c.has_camera,
+    }));
+};
+
 export const getCameraFeature = (cameraId) =>
   request(`${CAMERA_API}/get_feature/${cameraId}`, {
     method: 'POST',

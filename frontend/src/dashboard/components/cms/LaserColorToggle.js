@@ -5,8 +5,8 @@ import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 
 /**
- * 레이저 색(파랑/빨강) 전환 토글.
- * 값/변경 핸들러는 useCmsWorkspace의 laserColor / setLaserColor를 그대로 전달한다.
+ * 레이저 색(자동/파랑/빨강) 전환 토글.
+ * value / onChange 는 상위 컴포넌트(LaserPlaneGrid)의 색 상태를 그대로 전달한다.
  */
 export default function LaserColorToggle({ value, onChange, size = 'small', disabled = false }) {
   return (

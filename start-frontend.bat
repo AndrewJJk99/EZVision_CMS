@@ -1,3 +1,2 @@
 @echo off
-cd /d %~dp0frontend
-npm start
+call "%~dp0frontend\run.bat"

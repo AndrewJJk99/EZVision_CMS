@@ -1,3 +1,2 @@
 @echo off
-cd /d %~dp0backend\camera
-C:\Users\User\miniconda3\envs\ezvision\python.exe main.py
+call "%~dp0backend\camera\run.bat"

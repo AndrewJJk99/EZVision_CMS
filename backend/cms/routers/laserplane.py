@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
-"""레이저 광평면(3D) 캘리브레이션 라우터 — 기존 measurement/calibration과 분리.
+"""레이저 광평면(3D) 캘리브레이션·측정 라우터 (CMS).
 
-흐름:
-  1) start   : 저장된 내부파라미터(calibration_data/*.json)로 세션 시작
-  2) capture : 보드+레이저 프레임 1자세 → 코너·레이저 검출 → 보드 위 3D 적립
-  3) fit     : 누적 3D 점 → 광평면 피팅(RMS)
-  4) save    : laserplane_data/camera_X_laserplane.json 저장
-  5) measure : 두 픽셀 → 3D 복원 → 실제 거리(mm)
+통합 캘리브레이션(intrinsics K + 광평면을 한 세션에서) 흐름:
+  1) /combined/start        : 세션 시작
+  2) /combined/capture_*    : 보드(OFF)·레이저(ON) 프레임 적립 → 코너·레이저 검출
+  3) /combined/fit          : calibrateCamera(K) + 광평면 SVD 피팅(RMS)
+  4) /combined/save         : laserplane_data/camera_X_laserplane.json 저장
+  5) /measure*              : 두 픽셀 → 3D 복원 → 실제 거리(mm)
 
-기존 코드는 읽기만(재사용)한다: 내부파라미터 JSON, 코너검출(CalibrationSession),
-레이저검출(laser_manager). 측정 파이프라인은 건드리지 않는다.
+코너검출은 calibration_manager, 레이저/엣지 검출은 laser_manager,
+기하 복원은 laser_plane_manager를 재사용한다.
 """
 import os
 import sys
@@ -44,6 +44,9 @@ FRAME_RETRY_DELAY_SEC = 0.08
 # 카메라별 세션 (메모리) — 통합 캘리브레이션 세션 + 마지막 측정 프레임
 _COMBINED: dict = {}
 _MEAS: dict = {}  # 측정용: 카메라별 마지막 캡처의 레이저 점(u,v) + image_size
+_CAMCAL: dict = {}  # 카메라 단독(레이저X) 내부파라미터 캘리브 세션 — 진단용
+_LIVE_BAND: dict = {}  # 라이브 측정: 카메라별 마지막 레이저 y중심(밴드 추적으로 속도↑)
+LIVE_BAND_HALF = 360   # 밴드 반높이(px) — 레이저 주변 이 범위만 크롭해 검출
 
 
 async def _fetch_bgr(camera_id: int):
@@ -128,11 +131,27 @@ class MeasureCaptureRequest(BaseModel):
     sensitivity: int = Field(50, ge=0, le=100, description="자동 엣지 민감도 0(엄격)~100(민감)")
 
 
+class LiveMeasureRequest(BaseModel):
+    """라이브(연속) 측정 — 속도를 위해 색 고정 + 레이저 밴드 추적 크롭."""
+    laser_color: str = Field("blue", description="라이브는 고정 색 권장(blue|red). auto도 가능하나 느림")
+    detector: str = Field("chroma")
+    plane_file: Optional[str] = Field(None, description="광평면(있으면 mm, 없으면 px만)")
+    sensitivity: int = Field(60, ge=0, le=100)
+    track: bool = Field(True, description="레이저 밴드만 크롭해 빠르게(추적). 놓치면 자동 전체 재검색")
+
+
 class SaveRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=64, description="저장 이름(선택)")
 
 
 class CombinedStartRequest(BaseModel):
+    inner_cols: int = Field(12, ge=2, le=40)
+    inner_rows: int = Field(8, ge=2, le=40)
+    square_size_mm: float = Field(20.0, gt=0)
+
+
+class CamCalibStartRequest(BaseModel):
+    """카메라 단독 캘리브(레이저 없이 내부파라미터만) — 내부 RMS 진단용."""
     inner_cols: int = Field(12, ge=2, le=40)
     inner_rows: int = Field(8, ge=2, le=40)
     square_size_mm: float = Field(20.0, gt=0)
@@ -310,6 +329,95 @@ async def measure_capture(camera_id: int, req: MeasureCaptureRequest = MeasureCa
         return JSONResponse(status_code=503, content={"error": "프레임을 가져올 수 없습니다 (카메라 상태 확인)"})
     warn = _model_size_warning(model, img.shape[1], img.shape[0])
     return _measure_image(camera_id, img, model, req.laser_color, req.detector, warn, req.sensitivity)
+
+
+def _live_overlay(img, laser_uv, edge, out_w: int = 960) -> Optional[str]:
+    """라이브용 가벼운 오버레이 — 먼저 축소 후 엣지/레이저를 그려 속도↑."""
+    h, w = img.shape[:2]
+    sc = out_w / float(w) if w > out_w else 1.0
+    ov = cv2.resize(img, (int(w * sc), int(h * sc))) if sc != 1.0 else img.copy()
+    try:
+        pts = np.asarray(laser_uv, np.float64).reshape(-1, 2)
+        for p in pts[::6]:  # 성글게(속도)
+            cv2.circle(ov, (int(p[0] * sc), int(p[1] * sc)), 1, (0, 220, 0), -1)
+        if edge:
+            la = (int(edge["left_end"]["x"] * sc), int(edge["left_end"]["y"] * sc))
+            rb = (int(edge["right_end"]["x"] * sc), int(edge["right_end"]["y"] * sc))
+            cv2.line(ov, la, rb, (0, 255, 255), 2, cv2.LINE_AA)
+            cv2.circle(ov, la, 7, (0, 255, 0), 2)
+            cv2.circle(ov, rb, 7, (0, 0, 255), 2)
+    except Exception:
+        pass
+    ok, buf = cv2.imencode(".jpg", ov, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+    if not ok:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+@router.post("/measure_live/{camera_id}")
+async def measure_live(camera_id: int, req: LiveMeasureRequest = LiveMeasureRequest()):
+    """라이브(연속) 측정 — 프론트가 짧은 주기로 호출. 색 고정 + 레이저 밴드 추적으로
+    풀해상도 대비 빠르게 엣지+간격(+단차)을 반환한다. 시연: 라인을 따라가며 검출."""
+    if camera_id < 0 or camera_id >= 4:
+        return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
+    img = await _fetch_bgr(camera_id)
+    if img is None:
+        return JSONResponse(status_code=503, content={"error": "프레임을 가져올 수 없습니다"})
+    h, w = img.shape[:2]
+    color = str(req.laser_color or "blue").lower()
+    if color == "auto":
+        color = lm.detect_laser_color(img)
+
+    # ── 레이저 밴드 추적 크롭 (행만 잘라 폭·END_MARGIN은 그대로) ──
+    y_off = 0
+    sub = img
+    if req.track and camera_id in _LIVE_BAND:
+        c = int(_LIVE_BAND[camera_id])
+        y0 = max(0, c - LIVE_BAND_HALF); y1 = min(h, c + LIVE_BAND_HALF)
+        if y1 - y0 > 60:
+            sub = img[y0:y1]; y_off = y0
+
+    profile, _mask = lm.detect_laser_profile_for_gap(sub, laser_color=color, detector=req.detector)
+    if profile is not None and y_off:
+        profile = profile + y_off  # 크롭 y → 전체 y (NaN 유지)
+
+    nvalid = int(np.count_nonzero(~np.isnan(profile))) if profile is not None else 0
+    if nvalid >= 100:
+        yc = float(np.nanmedian(profile))
+        if np.isfinite(yc):
+            _LIVE_BAND[camera_id] = yc
+    elif y_off:
+        _LIVE_BAND.pop(camera_id, None)  # 레이저가 밴드 밖 → 다음 콜은 전체 재검색
+
+    laser_uv = np.array(lm.profile_to_points(profile), np.float64) if profile is not None else np.zeros((0, 2))
+    _MEAS[camera_id] = {"points": laser_uv, "image_size": (w, h)}
+
+    edge = None
+    if profile is not None and nvalid >= 100:
+        mh, nm, mj = _edge_thresholds(req.sensitivity)
+        edge, _err = lm.measure_edge_from_profile(
+            profile, end_margin_px=lm.DEFAULT_EDGE_END_MARGIN_PX,
+            min_hole=mh, noise_mult=nm, min_jump=mj,
+        )
+
+    out = {"ok": True, "laser_color": color, "n_laser": int(len(laser_uv)),
+           "image_size": {"width": w, "height": h}, "tracking": bool(y_off)}
+    if edge:
+        lu = [float(edge["left_end"]["x"]), float(edge["left_end"]["y"])]
+        ru = [float(edge["right_end"]["x"]), float(edge["right_end"]["y"])]
+        info = {"a_uv": [round(lu[0], 1), round(lu[1], 1)], "b_uv": [round(ru[0], 1), round(ru[1], 1)],
+                "gap_px": edge.get("gap_px"), "kind": edge.get("kind")}
+        model = _load_measure_model(camera_id, req.plane_file)
+        if model is not None:
+            A = model.reconstruct(np.asarray(lu, np.float64).reshape(1, 2))[0]
+            B = model.reconstruct(np.asarray(ru, np.float64).reshape(1, 2))[0]
+            if np.isfinite(A).all() and np.isfinite(B).all():
+                d = B - A
+                info["distance_mm"] = round(float(np.linalg.norm(d)), 3)
+                info["depth_diff_mm"] = round(abs(float(d[2])), 3)
+        out["edge"] = info
+    out["overlay"] = _live_overlay(img, laser_uv, edge)
+    return out
 
 
 @router.post("/measure_file/{camera_id}")
@@ -504,3 +612,88 @@ async def combined_reset(camera_id: int):
         return JSONResponse(status_code=409, content={"error": "세션이 없습니다."})
     session.reset()
     return {"message": "초기화됨", "status": session.status()}
+
+
+# ─────────────────────────────────────────────────────────────
+# 카메라 단독 캘리브레이션 (레이저 없이 내부파라미터만) — 내부 RMS 진단
+#   통합 캘리브의 내부 RMS가 높을 때, 레이저·광평면을 빼고 '코너만'으로
+#   카메라 보정을 돌려 per-view 오차·이상치를 확인해 원인을 격리한다.
+# ─────────────────────────────────────────────────────────────
+def _camcal_overlay(img, pattern_size, corners, found, max_w: int = 960) -> Optional[str]:
+    """검출된 체커보드 코너를 그려 오버레이(코너가 격자에 정확히 박히는지 눈으로 확인)."""
+    h, w = img.shape[:2]
+    sc = max_w / float(w) if w > max_w else 1.0
+    ov = cv2.resize(img, (int(w * sc), int(h * sc))) if sc != 1.0 else img.copy()
+    try:
+        if found and corners is not None:
+            cv2.drawChessboardCorners(ov, pattern_size, (np.asarray(corners, np.float32) * sc), bool(found))
+    except Exception:
+        pass
+    ok, buf = cv2.imencode(".jpg", ov, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    if not ok:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+
+
+@router.post("/camcalib/start/{camera_id}")
+async def camcalib_start(camera_id: int, req: CamCalibStartRequest = CamCalibStartRequest()):
+    """카메라 단독 캘리브 세션 시작 — 레이저는 꺼두고 체커보드만 캡처."""
+    if camera_id < 0 or camera_id >= 4:
+        return JSONResponse(status_code=400, content={"error": "Invalid camera_id"})
+    cfg = CalibrationConfig(inner_cols=req.inner_cols, inner_rows=req.inner_rows,
+                            square_size_mm=req.square_size_mm)
+    _CAMCAL[camera_id] = CalibrationSession(camera_id=camera_id, config=cfg)
+    return {"ok": True, "message": "카메라 단독 캘리브 시작 — 레이저 끄고 체커보드를 여러 자세로 캡처하세요",
+            "pattern_inner_corners": [req.inner_cols, req.inner_rows], "square_size_mm": req.square_size_mm,
+            "sample_count": 0}
+
+
+@router.post("/camcalib/capture/{camera_id}")
+async def camcalib_capture(camera_id: int):
+    """1장 캡처 → 체커보드 코너 검출 → 샘플 추가. 코너 오버레이 반환(검출 품질 확인)."""
+    sess = _CAMCAL.get(camera_id)
+    if sess is None:
+        return JSONResponse(status_code=409, content={"error": "세션이 없습니다. 먼저 시작하세요."})
+    img = await _fetch_bgr(camera_id)
+    if img is None:
+        return JSONResponse(status_code=503, content={"error": "프레임을 가져올 수 없습니다 (카메라 상태 확인)"})
+    found, corners = sess.detect_corners_for_capture(img)
+    res = sess.add_sample(img)
+    overlay = _camcal_overlay(img, sess.pattern_size, corners, found)
+    out = {**res, "found": bool(found), "overlay": overlay}
+    if not res.get("success"):
+        return JSONResponse(status_code=422, content=out)
+    return out
+
+
+@router.post("/camcalib/fit/{camera_id}")
+async def camcalib_fit(camera_id: int):
+    """카메라 보정 실행 → 내부 RMS + per-view 오차 + 이상치 제외 + 품질 리포트.
+    내부 RMS가 높으면 어느 자세(per_view)가 문제인지 바로 보인다."""
+    sess = _CAMCAL.get(camera_id)
+    if sess is None:
+        return JSONResponse(status_code=409, content={"error": "세션이 없습니다."})
+    res = sess.run_calibration()
+    if not res.get("success"):
+        return JSONResponse(status_code=422, content=res)
+    return res
+
+
+@router.post("/camcalib/reset/{camera_id}")
+async def camcalib_reset(camera_id: int):
+    sess = _CAMCAL.get(camera_id)
+    if sess is not None:
+        sess.reset_samples()
+    return {"ok": True, "message": "초기화됨", "sample_count": 0}
+
+
+@router.get("/camcalib/status/{camera_id}")
+async def camcalib_status(camera_id: int):
+    sess = _CAMCAL.get(camera_id)
+    if sess is None:
+        return {"started": False}
+    return {"started": True, "sample_count": sess.sample_count,
+            "pattern_inner_corners": list(sess.pattern_size),
+            "rms_error": sess.rms_error,
+            "per_view_errors": sess.per_view_errors,
+            "excluded_sample_indices": sess.excluded_sample_indices}

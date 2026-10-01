@@ -24,18 +24,22 @@ import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import IconButton from '@mui/material/IconButton';
+import Tooltip from '@mui/material/Tooltip';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import ZoomOutMapRoundedIcon from '@mui/icons-material/ZoomOutMapRounded';
 import ViewInArRoundedIcon from '@mui/icons-material/ViewInArRounded';
 import SaveRoundedIcon from '@mui/icons-material/SaveRounded';
+import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import LaserColorToggle from './cms/LaserColorToggle';
 import LiveCameraView from './LiveCameraView';
 import { CAMERA_OPTIONS } from './cms/constants';
+import { getAvailableCameras } from '../../services/camera.api';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import {
   lpcStatus, lpcStart, lpcCaptureOff, lpcCaptureOn, lpcCaptureSingle, lpcFit, lpcSave, lpcReset,
-  lpGetModel, lpMeasure, lpMeasureCapture, lpMeasureFile, lpListPlanes,
+  lpGetModel, lpMeasure, lpMeasureCapture, lpMeasureFile, lpMeasureLive, lpListPlanes,
+  lpCamCalStart, lpCamCalCapture, lpCamCalFit, lpCamCalReset,
 } from '../../services/laserplane.api';
 
 const errText = (e) => e?.data?.error || e?.message || '요청 실패';
@@ -65,6 +69,8 @@ function DemoRow({ label, children }) {
 export default function LaserPlaneGrid() {
   const [tab, setTab] = React.useState('measure');
   const [cam, setCam] = React.useState(0);
+  // 사용 가능한 카메라 목록 — 백엔드 상태에서 동적으로 채운다(카메라 추가 시 자동 반영).
+  const [cameras, setCameras] = React.useState(CAMERA_OPTIONS.map((o) => ({ ...o, connected: false, ip: null })));
   const [laserColor, setLaserColor] = React.useState('auto');
   const [captureMode, setCaptureMode] = React.useState('single'); // single | offon
   const [cols, setCols] = React.useState(12);
@@ -89,7 +95,7 @@ export default function LaserPlaneGrid() {
   const [enlarge, setEnlarge] = React.useState(false);
   const [planeManagerOpen, setPlaneManagerOpen] = React.useState(false);
   const [draftPlane, setDraftPlane] = React.useState('');
-  const [measView, setMeasView] = React.useState('live'); // live | still
+  const [measCam, setMeasCam] = React.useState(null);
   const [measImg, setMeasImg] = React.useState(null);
   const [measSize, setMeasSize] = React.useState(null); // {width,height} 원본
   const [ptA, setPtA] = React.useState(null); // {u,v,fx,fy}
@@ -100,6 +106,14 @@ export default function LaserPlaneGrid() {
   const [bodyNo, setBodyNo] = React.useState('');
   const [inspectedAt, setInspectedAt] = React.useState(null);
   const [inspLogs, setInspLogs] = React.useState([]);
+  // 라이브(연속) 검출 — 시연: 라인을 따라가며 엣지를 실시간 표시
+  const [liveOn, setLiveOn] = React.useState(false);
+  const [liveOverlay, setLiveOverlay] = React.useState(null);
+  const [liveResult, setLiveResult] = React.useState(null);
+  // 카메라 단독 캘리브(진단) — 레이저 없이 내부 RMS만
+  const [ccCount, setCcCount] = React.useState(0);
+  const [ccOverlay, setCcOverlay] = React.useState(null);
+  const [ccResult, setCcResult] = React.useState(null);
 
   const refreshStatus = React.useCallback(async () => {
     try { const r = await lpcStatus(cam); setCstatus(r.started ? r.status : null); }
@@ -120,7 +134,50 @@ export default function LaserPlaneGrid() {
     try { setModel(await lpGetModel(cam, planeFile)); } catch (e) { setModel(null); }
   }, [cam]);
 
+  // 연결/매핑된 카메라를 백엔드에서 조회해 선택 목록을 동적으로 구성.
+  // 실패하거나 비어 있으면 기본 목록(CAMERA_OPTIONS)으로 폴백 → 파일 측정은 계속 가능.
+  const refreshCameras = React.useCallback(async () => {
+    try {
+      const list = await getAvailableCameras();
+      if (list && list.length) {
+        setCameras(list);
+        setCam((prev) => (list.some((c) => c.backend === prev) ? prev : list[0].backend));
+      } else {
+        setCameras(CAMERA_OPTIONS.map((o) => ({ ...o, connected: false, ip: null })));
+      }
+    } catch (e) {
+      setCameras(CAMERA_OPTIONS.map((o) => ({ ...o, connected: false, ip: null })));
+    }
+  }, []);
+
+  React.useEffect(() => { refreshCameras(); }, [refreshCameras]);
   React.useEffect(() => { refreshStatus(); refreshPlanes(); }, [refreshStatus, refreshPlanes]);
+
+  // 카메라 바뀌면 라이브 중지
+  React.useEffect(() => { setLiveOn(false); }, [cam]);
+
+  // 라이브 검출 루프 — liveOn 동안 짧은 주기로 measure_live 폴링(오버레이+수치 갱신).
+  // 한 번에 한 요청만(in-flight 가드) → 검출시간에 맞춰 자연스럽게 페이싱.
+  React.useEffect(() => {
+    if (!liveOn) return undefined;
+    let alive = true;
+    let timer = null;
+    const tick = async () => {
+      if (!alive) return;
+      try {
+        const r = await lpMeasureLive(cam, {
+          laser_color: laserColor, detector: 'chroma',
+          plane_file: selectedPlane || null, sensitivity, track: true,
+        });
+        if (!alive) return;
+        if (r.overlay) setLiveOverlay(r.overlay);
+        setLiveResult(r.edge || null);
+      } catch (e) { /* 다음 프레임 재시도 */ }
+      if (alive) timer = setTimeout(tick, 100);
+    };
+    tick();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [liveOn, cam, laserColor, selectedPlane, sensitivity]);
   React.useEffect(() => { if (selectedPlane !== undefined) refreshModel(selectedPlane); }, [selectedPlane, refreshModel]);
 
   const act = async (fn, showOverlay = true) => {
@@ -152,8 +209,11 @@ export default function LaserPlaneGrid() {
     setSev('success'); setMsg(`자세 ${r.pose_index} 확정 · 레이저 ${r.n_laser}점(보드위 ${r.n_onboard}) · 색 ${r.laser_color}`); return r;
   });
   const cFit = () => act(async () => {
-    const r = await lpcFit(cam); setSev('success');
-    setMsg(`통합 피팅 완료 · 내부 RMS ${r.intrinsic_rms_px}px · 광평면 RMS ${r.plane_rms_mm}mm`); return r;
+    const r = await lpcFit(cam);
+    const base = `통합 피팅 완료 · 내부 RMS ${r.intrinsic_rms_px}px · 광평면 RMS ${r.plane_rms_mm}mm · 깊이범위 ${r.depth_span_mm ?? '—'}mm`;
+    if (r.weak) { setSev('warning'); setMsg(`${base} · ⚠ 깊이 다양성 낮음 — 여러 거리에서 더 캡처 권장`); }
+    else { setSev('success'); setMsg(base); }
+    return r;
   }, false);
   const cSave = () => act(async () => {
     const r = await lpcSave(cam, planeName);
@@ -162,6 +222,32 @@ export default function LaserPlaneGrid() {
     return r;
   }, false);
   const cReset = () => act(async () => { const r = await lpcReset(cam); setSev('info'); setMsg('초기화됨'); setOverlay(null); setView('live'); return r; }, false);
+
+  // ── 카메라 단독 캘리브(진단) 핸들러 ──
+  const ccStart = () => act(async () => {
+    const r = await lpCamCalStart(cam, { inner_cols: Number(cols), inner_rows: Number(rows), square_size_mm: Number(squareMm) });
+    setCcCount(0); setCcOverlay(null); setCcResult(null);
+    setSev('info'); setMsg('카메라 단독 캘리브 시작 — 레이저 끄고 체커보드를 여러 자세로 캡처'); return r;
+  }, false);
+  const ccCapture = () => act(async () => {
+    const r = await lpCamCalCapture(cam);
+    if (r?.overlay) setCcOverlay(r.overlay);
+    if (r?.sample_count != null) setCcCount(r.sample_count);
+    setSev(r?.found ? 'success' : 'warning');
+    setMsg(r?.message || (r?.found ? '코너 검출됨' : '체커보드 미검출'));
+    return r;
+  }, false);
+  const ccFit = () => act(async () => {
+    const r = await lpCamCalFit(cam);
+    setCcResult(r);
+    setSev(r.rms_error <= 1.0 ? 'success' : 'warning');
+    setMsg(`카메라 단독 내부 RMS ${Number(r.rms_error).toFixed(3)}px · 샘플 ${r.sample_count}장${r.excluded_sample_indices?.length ? ` · outlier ${r.excluded_sample_indices.length}장 제외` : ''}`);
+    return r;
+  }, false);
+  const ccReset = () => act(async () => {
+    const r = await lpCamCalReset(cam); setCcCount(0); setCcOverlay(null); setCcResult(null);
+    setSev('info'); setMsg('진단 초기화됨'); return r;
+  }, false);
 
   const fileRef = React.useRef(null);
 
@@ -182,8 +268,9 @@ export default function LaserPlaneGrid() {
     }, ...prev].slice(0, 300));
   };
 
-  const applyCapture = (r, srcLabel) => {
-    setMeasImg(r.image); setMeasSize(r.image_size); setMeasView('still');
+  const applyCapture = (r, srcLabel, cameraId = cam) => {
+    setMeasCam(cameraId);
+    setMeasImg(r.image); setMeasSize(r.image_size);
     setInspectedAt(new Date());
     if (r.auto && r.image_size) {
       const a = r.auto.a_uv, b = r.auto.b_uv;
@@ -199,11 +286,13 @@ export default function LaserPlaneGrid() {
     }
   };
 
-  const onMeasCapture = async () => {
+  const onMeasCapture = async (cameraId = cam) => {
+    setCam(cameraId);
+    setLiveOn(false);
     setLoading(true); setMsg('');
     try {
-      const r = await lpMeasureCapture(cam, { laser_color: laserColor, detector: 'chroma', plane_file: selectedPlane || null, sensitivity });
-      applyCapture(r, '카메라 캡처');
+      const r = await lpMeasureCapture(cameraId, { laser_color: laserColor, detector: 'chroma', plane_file: selectedPlane || null, sensitivity });
+      applyCapture(r, '카메라 캡처', cameraId);
     } catch (e) { setSev('error'); setMsg(errText(e)); } finally { setLoading(false); }
   };
 
@@ -294,13 +383,17 @@ export default function LaserPlaneGrid() {
   const pendingOff = cstatus?.pending_off;
   const fitted = cstatus?.fitted;
   const poseProgress = Math.min(100, (nPoses / RECO_POSES) * 100);
-  const gapMm = measResult?.distance_mm ?? null;
-  const stepMm = measResult?.depth_diff_mm ?? null;
+  const gapMm = (liveOn ? liveResult?.distance_mm : measResult?.distance_mm) ?? null;
+  const stepMm = (liveOn ? liveResult?.depth_diff_mm : measResult?.depth_diff_mm) ?? null;
   const gapLimit = Number(gapSpec);
   const stepLimit = Number(stepSpec);
   const hasMeasure = gapMm != null && stepMm != null && Number.isFinite(gapLimit) && Number.isFinite(stepLimit);
   const isNg = hasMeasure && (Number(gapMm) > gapLimit || Math.abs(Number(stepMm)) > stepLimit);
   const judgeLabel = loading ? '검사중' : hasMeasure ? (isNg ? 'NG' : 'OK') : inspectedAt ? '재측정' : '대기';
+  const onCameras = cameras.filter((c) => c.connected);
+  const shownCameras = onCameras.length
+    ? onCameras
+    : [{ backend: cam, ui: cameras.find((c) => c.backend === cam)?.ui ?? cam + 1 }];
   const inspectedText = inspectedAt
     ? inspectedAt.toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
     : '—';
@@ -313,20 +406,104 @@ export default function LaserPlaneGrid() {
           <ViewInArRoundedIcon color="primary" />
           <Typography variant="h6" sx={{ fontWeight: 700 }}>CMS · 레이저 3D</Typography>
         </Stack>
-        <TextField select size="small" label="카메라" value={cam} onChange={(e) => setCam(Number(e.target.value))} sx={{ width: 130 }}>
-          {CAMERA_OPTIONS.map((o) => (<MenuItem key={o.backend} value={o.backend}>{`Camera ${o.ui}`}</MenuItem>))}
-        </TextField>
+        <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+          <TextField select size="small" label="카메라" value={cam} onChange={(e) => setCam(Number(e.target.value))} sx={{ minWidth: 170 }}>
+            {cameras.map((o) => (
+              <MenuItem key={o.backend} value={o.backend}>
+                <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center', gap: 0.75 }}>
+                  <Box sx={{ width: 8, height: 8, borderRadius: '50%', flexShrink: 0, bgcolor: o.connected ? 'success.main' : 'text.disabled' }} />
+                  {`Camera ${o.ui}`}{o.ip ? ` · ${o.ip}` : ''}
+                </Box>
+              </MenuItem>
+            ))}
+          </TextField>
+          <Tooltip title="카메라 목록 새로고침">
+            <IconButton size="small" onClick={refreshCameras}><RefreshRoundedIcon fontSize="small" /></IconButton>
+          </Tooltip>
+        </Stack>
       </Stack>
 
       <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2, minHeight: 42, borderBottom: 1, borderColor: 'divider', '& .MuiTab-root': { fontWeight: 700, minHeight: 42 } }}>
         <Tab value="measure" label="Measure" />
         <Tab value="calib" label="Calibration" />
+        <Tab value="diag" label="진단" />
         <Tab value="log" label="Log" />
       </Tabs>
 
       {msg && <Alert severity={sev} sx={{ mb: 2, borderRadius: 2 }} onClose={() => setMsg('')}>{msg}</Alert>}
 
-      {tab === 'calib' ? (
+      {tab === 'diag' ? (
+        <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(0, 1fr) 340px' }, gap: 1.5, alignItems: 'start' }}>
+          <Paper elevation={0} variant="outlined" sx={{ p: 1.5, minWidth: 0 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>카메라 단독 캘리브 — 코너 검출</Typography>
+            <Box sx={cameraFrameSx}>
+              {ccOverlay ? (
+                <Box component="img" src={ccOverlay} alt="corner overlay"
+                  sx={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+              ) : (
+                <Box sx={{ display: 'block', width: '100%', height: '100%' }}>
+                  <LiveCameraView cameraIdBackend={cam} height="100%" flush />
+                </Box>
+              )}
+            </Box>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
+              캡처하면 검출된 코너가 격자로 표시됩니다 — <b>코너가 교차점마다 정확히 박혀야</b> 내부 RMS가 낮습니다. 삐뚤거나 밀리면 그 자세가 문제.
+            </Typography>
+          </Paper>
+
+          <Stack spacing={1.5}>
+            <Paper elevation={0} variant="outlined" sx={{ p: 1.5 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>레이저 없이 카메라만 (내부 RMS 진단)</Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                레이저를 <b>끄고</b> 체커보드만 여러 거리·각도로 캡처 → 내부 RMS만 분리해서 확인. (통합 캘리브와 별개, 저장 안 함)
+              </Typography>
+              <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
+                <TextField size="small" label="열" type="number" value={cols} onChange={(e) => setCols(e.target.value)} sx={{ flex: 1 }} />
+                <TextField size="small" label="행" type="number" value={rows} onChange={(e) => setRows(e.target.value)} sx={{ flex: 1 }} />
+                <TextField size="small" label="칸mm" type="number" value={squareMm} onChange={(e) => setSquareMm(e.target.value)} sx={{ flex: 1 }} />
+              </Stack>
+              <Stack direction="row" spacing={1} sx={{ mb: 1 }}>
+                <Button variant="outlined" size="small" onClick={ccStart} disabled={loading} sx={{ flex: 1 }}>시작</Button>
+                <Button variant="contained" size="small" onClick={ccCapture} disabled={loading} sx={{ flex: 1 }}>캡처</Button>
+                <Button variant="outlined" color="inherit" size="small" onClick={ccReset} disabled={loading}>초기화</Button>
+              </Stack>
+              <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mb: 1 }}>
+                <Chip size="small" label={`샘플 ${ccCount}장`} color={ccCount >= 8 ? 'success' : 'default'} />
+                <Button variant="contained" color="secondary" size="small" onClick={ccFit} disabled={loading || ccCount < 3} sx={{ flex: 1 }}>
+                  내부 RMS 계산
+                </Button>
+              </Stack>
+            </Paper>
+
+            {ccResult && (
+              <Paper elevation={0} variant="outlined" sx={{ p: 1.5 }}>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1 }}>결과</Typography>
+                <Box sx={{ py: 1, mb: 1, borderRadius: 1, textAlign: 'center', color: '#fff',
+                  bgcolor: ccResult.rms_error <= 0.5 ? 'success.main' : ccResult.rms_error <= 1.0 ? 'warning.main' : 'error.main' }}>
+                  <Typography variant="h4" sx={{ fontWeight: 800, lineHeight: 1.1 }}>{Number(ccResult.rms_error).toFixed(3)}<Typography component="span" variant="body2"> px</Typography></Typography>
+                  <Typography variant="caption">내부 RMS ({ccResult.rms_error <= 0.5 ? '좋음' : ccResult.rms_error <= 1.0 ? '양호' : '높음 — 코너 문제'})</Typography>
+                </Box>
+                <DemoRow label="샘플 수"><Typography variant="body2" sx={{ fontWeight: 700 }}>{ccResult.sample_count}장</Typography></DemoRow>
+                <DemoRow label="fx / fy"><Typography variant="body2" sx={{ fontWeight: 700 }}>{Math.round(ccResult.focal_length_px?.fx)} / {Math.round(ccResult.focal_length_px?.fy)}</Typography></DemoRow>
+                {ccResult.excluded_sample_indices?.length > 0 && (
+                  <DemoRow label="제외된 자세"><Typography variant="body2" sx={{ fontWeight: 700, color: 'error.main' }}>#{ccResult.excluded_sample_indices.map((i) => i + 1).join(', ')}</Typography></DemoRow>
+                )}
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1, mb: 0.5, fontWeight: 700 }}>자세별 오차 (px)</Typography>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                  {(ccResult.all_per_view_errors || ccResult.per_view_errors || []).map((e, i) => (
+                    <Chip key={i} size="small" label={`#${i + 1}: ${Number(e).toFixed(2)}`}
+                      color={e > 1.0 ? 'error' : e > 0.5 ? 'warning' : 'default'}
+                      variant={ccResult.excluded_sample_indices?.includes(i) ? 'filled' : 'outlined'} />
+                  ))}
+                </Box>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                  빨강 = 오차 큰 자세(그 캡처가 문제). 특정 자세만 크면 그 자세를 빼고 다시, 전부 크면 보드 초점·정지·패턴설정 점검.
+                </Typography>
+              </Paper>
+            )}
+          </Stack>
+        </Box>
+      ) : tab === 'calib' ? (
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(0, 1fr) 320px' }, gap: 1.5, alignItems: 'start' }}>
           <Paper elevation={0} variant="outlined" sx={{ p: 1.5, minWidth: 0 }}>
             <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
@@ -442,7 +619,9 @@ export default function LaserPlaneGrid() {
                     </TableCell>
                   </TableRow>
                 ) : inspLogs.map((row) => {
-                  const camUi = CAMERA_OPTIONS.find((o) => o.backend === row.cam)?.ui;
+                  const camUi = cameras.find((o) => o.backend === row.cam)?.ui
+                    ?? CAMERA_OPTIONS.find((o) => o.backend === row.cam)?.ui
+                    ?? row.cam + 1;
                   const atText = row.at.toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
                   return (
                     <TableRow key={row.id} hover>
@@ -463,35 +642,57 @@ export default function LaserPlaneGrid() {
         </Paper>
       ) : (
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(0, 1fr) 320px' }, gap: 1.5, alignItems: 'start' }}>
-          <Paper elevation={0} variant="outlined" sx={{ p: 1.5, minWidth: 0 }}>
-            <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', mb: 1, flexWrap: 'wrap', gap: 1 }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>아비르 카메라</Typography>
-              <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                <Button variant="contained" size="small" onClick={onMeasCapture} disabled={loading || !model}>검사</Button>
-                {measView === 'still' && (
-                  <Button size="small" onClick={() => setMeasView('live')}>LIVE</Button>
-                )}
-              </Stack>
-            </Stack>
-            <Box sx={cameraFrameSx}>
-              <Box sx={{ display: measView === 'live' ? 'block' : 'none', width: '100%', height: '100%' }}>
-                <LiveCameraView cameraIdBackend={cam} height="100%" flush />
-              </Box>
-              {measView === 'still' && measImg && measImageView('100%', false, true)}
-            </Box>
-            {measView === 'still' && measImg && (
-              <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 1, flexWrap: 'wrap', gap: 1 }}>
-                <ButtonGroup size="small" variant="outlined">
-                  <Button onClick={() => setZoom((z) => Math.max(1, +(z - 0.5).toFixed(1)))} disabled={zoom <= 1}>－</Button>
-                  <Button onClick={() => setZoom(1)}>맞춤</Button>
-                  <Button onClick={() => setZoom((z) => Math.min(6, +(z + 0.5).toFixed(1)))} disabled={zoom >= 6}>＋</Button>
-                  <Button onClick={() => setZoom(3)}>원본</Button>
-                </ButtonGroup>
-                <Typography variant="caption" color="text.secondary">{Math.round(zoom * 100)}%</Typography>
-                <Button size="small" startIcon={<ZoomOutMapRoundedIcon />} onClick={() => setEnlarge(true)}>크게 보기</Button>
-              </Stack>
-            )}
-          </Paper>
+          <Box sx={{ display: 'grid', gridTemplateColumns: `repeat(${Math.max(shownCameras.length, 1)}, minmax(0, 1fr))`, gap: 1.5, minWidth: 0 }}>
+            {shownCameras.map((c) => {
+              const showingStill = measImg && measCam === c.backend && !liveOn;
+              const showingDetect = liveOn && cam === c.backend;
+              return (
+                <Paper key={c.backend} elevation={0} variant="outlined" sx={{ p: 1.5, minWidth: 0, outline: cam === c.backend ? '2px solid' : 'none', outlineColor: 'primary.main' }}>
+                  <Stack direction="row" sx={{ alignItems: 'center', justifyContent: 'space-between', mb: 1, flexWrap: 'wrap', gap: 0.5 }}>
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>Camera {c.ui}</Typography>
+                    <Stack direction="row" spacing={0.5}>
+                      <Button
+                        size="small"
+                        variant={showingDetect ? 'outlined' : 'text'}
+                        color={showingDetect ? 'error' : 'primary'}
+                        onClick={() => { setCam(c.backend); setLiveOn((v) => (cam === c.backend ? !v : true)); }}
+                      >
+                        {showingDetect ? '라이브 중지' : '라이브'}
+                      </Button>
+                      <Button size="small" variant="contained" onClick={() => onMeasCapture(c.backend)} disabled={loading || !model}>검사</Button>
+                      {showingStill && (
+                        <Button size="small" onClick={() => setMeasCam(null)}>LIVE</Button>
+                      )}
+                    </Stack>
+                  </Stack>
+                  <Box sx={{ width: '100%', aspectRatio: '4 / 3', bgcolor: '#0c0c0c', borderRadius: 1, overflow: 'hidden' }}>
+                    {showingStill ? measImageView('100%', false, true) : showingDetect ? (
+                      liveOverlay ? (
+                        <Box component="img" src={liveOverlay} alt="" sx={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+                      ) : (
+                        <Box sx={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                          <Typography variant="caption" sx={{ color: '#888' }}>검출 중…</Typography>
+                        </Box>
+                      )
+                    ) : (
+                      <LiveCameraView cameraIdBackend={c.backend} height="100%" flush />
+                    )}
+                  </Box>
+                  {showingStill && (
+                    <Stack direction="row" spacing={1} sx={{ alignItems: 'center', mt: 1, flexWrap: 'wrap', gap: 1 }}>
+                      <ButtonGroup size="small" variant="outlined">
+                        <Button onClick={() => setZoom((z) => Math.max(1, +(z - 0.5).toFixed(1)))} disabled={zoom <= 1}>－</Button>
+                        <Button onClick={() => setZoom(1)}>맞춤</Button>
+                        <Button onClick={() => setZoom((z) => Math.min(6, +(z + 0.5).toFixed(1)))} disabled={zoom >= 6}>＋</Button>
+                        <Button onClick={() => setZoom(3)}>원본</Button>
+                      </ButtonGroup>
+                      <Button size="small" startIcon={<ZoomOutMapRoundedIcon />} onClick={() => setEnlarge(true)}>크게 보기</Button>
+                    </Stack>
+                  )}
+                </Paper>
+              );
+            })}
+          </Box>
 
           <Stack spacing={1.5}>
           <Paper elevation={0} variant="outlined" sx={{ p: 1.5 }}>
@@ -558,17 +759,12 @@ export default function LaserPlaneGrid() {
             <Alert severity="info" sx={{ borderRadius: 2 }}>저장된 캘리브레이션이 없습니다. Calibration 탭에서 피팅·저장하세요.</Alert>
           ) : (
             <>
-              <Tabs
-                value={draftPlane}
-                onChange={(_, v) => setDraftPlane(v)}
-                variant="scrollable"
-                scrollButtons="auto"
-                sx={{ borderBottom: 1, borderColor: 'divider', minHeight: 42, '& .MuiTab-root': { fontWeight: 700, minHeight: 42, textTransform: 'none' } }}
-              >
+              <TextField select fullWidth size="small" label="캘리브레이션" value={draftPlane} onChange={(e) => setDraftPlane(e.target.value)}
+                sx={{ mt: 1 }} InputLabelProps={{ shrink: true }}>
                 {planes.map((p) => (
-                  <Tab key={p.file} value={p.file} label={p.name || p.file} />
+                  <MenuItem key={p.file} value={p.file}>{p.name || p.file}</MenuItem>
                 ))}
-              </Tabs>
+              </TextField>
               {draftMeta && (
                 <Stack direction="row" spacing={1} sx={{ mt: 2, flexWrap: 'wrap', gap: 1 }}>
                   {draftMeta.fit_rms_mm != null && <Chip size="small" color="success" label={`RMS ${draftMeta.fit_rms_mm} mm`} />}

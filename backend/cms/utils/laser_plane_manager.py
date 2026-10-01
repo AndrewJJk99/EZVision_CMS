@@ -151,6 +151,40 @@ def fit_plane_svd(points3d: np.ndarray) -> Optional[dict]:
     }
 
 
+# 광평면 퇴화(degenerate) 판정 임계값 — 합성 검증으로 정함.
+#   레이저 3D 점이 2D 면을 못 채우고 거의 한 직선이면, 그 직선을 지나는 평면이
+#   무수히 많아 법선이 엉뚱하게 결정된다(측정 시 거리 발산·비단조).
+#   판별자 s2/s1(평면성): 정상 ≤0.06, 퇴화(직선) ≈0.96 → 0.10에서 큰 마진으로 갈림.
+PLANE_PLANARITY_MAX = 0.10   # s2/s1 (2번째 퍼짐 대비 두께). 초과 → 퇴화(직선)
+PLANE_SPREAD_MIN = 0.010     # s1/s0 (2D 퍼짐). 미만 → 사실상 1D
+PLANE_SPREAD_WARN = 0.05     # 이 미만이면 약한 캘리브(경고, 저장은 허용)
+
+
+def plane_health(fit: dict) -> dict:
+    """평면 피팅의 건전성 지표 + 퇴화 여부. fit=fit_plane_svd(...) 결과."""
+    sv = fit.get("singular_values") or []
+    s0 = float(sv[0]) if len(sv) > 0 else 0.0
+    s1 = float(sv[1]) if len(sv) > 1 else 0.0
+    s2 = float(sv[2]) if len(sv) > 2 else 0.0
+    spread = (s1 / s0) if s0 > 1e-9 else 0.0        # 2D 퍼짐(작을수록 직선)
+    planarity = (s2 / s1) if s1 > 1e-9 else 1.0     # 두께/2D폭(클수록 1D)
+    nz = abs(float(np.asarray(fit["n"], float).reshape(3)[2]))
+    reasons = []
+    if planarity > PLANE_PLANARITY_MAX:
+        reasons.append(f"점들이 거의 한 직선(평면성 {planarity:.3f} > {PLANE_PLANARITY_MAX})")
+    if spread < PLANE_SPREAD_MIN:
+        reasons.append(f"레이저 점이 2D로 퍼지지 않음(퍼짐비 {spread:.4f} < {PLANE_SPREAD_MIN})")
+    return {
+        "spread_ratio": round(spread, 4),
+        "planarity": round(planarity, 5),
+        "n_z": round(nz, 4),
+        "singular_values": [round(s0, 3), round(s1, 3), round(s2, 3)],
+        "degenerate": bool(reasons),
+        "reasons": reasons,
+        "weak": bool(spread < PLANE_SPREAD_WARN and not reasons),
+    }
+
+
 # ─────────────────────────────────────────────────────────────
 # 광평면 모델 (저장/로드/복원)
 # ─────────────────────────────────────────────────────────────
@@ -454,6 +488,29 @@ class LaserPlaneCombinedSession:
         fit = fit_plane_svd(pts)
         self.plane_fit = fit
         zs = [pp["board_z_mm"] for pp in per_pose]
+        depth_span = round(float(max(zs) - min(zs)), 1) if zs else 0.0
+
+        # ── 퇴화(degenerate) 광평면 감지 ──────────────────────────
+        # 레이저 3D 점이 2D 면을 못 채우고 거의 한 직선이면 평면이 유일하게
+        # 결정되지 않아 법선이 엉뚱하게 나온다(측정 시 거리 발산·비단조).
+        # 이런 평면은 저장 후 측정을 망치므로 모델을 만들지 않고 거부한다.
+        health = plane_health(fit)
+        health["depth_span_mm"] = depth_span
+        if health["degenerate"]:
+            self.model = None
+            self.last_message = "광평면 퇴화 감지 — 저장 불가 (다른 거리에서 재캡처 필요)"
+            return {
+                "ok": False, "degenerate": True,
+                "error": ("광평면이 퇴화했습니다(" + ", ".join(health["reasons"]) + "). "
+                          "체커보드를 여러 '거리'(가까이·멀리)와 위·아래 위치로 옮겨가며 다시 캡처하세요. "
+                          f"현재 깊이 범위 {depth_span:.0f}mm — 200mm 이상 권장."),
+                "health": health,
+                "intrinsic_rms_px": round(float(rms), 4),
+                "plane_rms_mm": round(fit["rms"], 4),
+                "n_poses": len(self.poses), "per_pose": per_pose,
+                "status": None,
+            }
+
         self.model = LaserPlaneModel(
             n=fit["n"], d=fit["d"], K=K, dist=dist,
             meta={
@@ -464,16 +521,18 @@ class LaserPlaneCombinedSession:
                 "square_size_mm": self.square_mm,
                 "pattern_inner_corners": [self.inner_cols, self.inner_rows],
                 "image_size": {"width": self.image_size[0], "height": self.image_size[1]},
-                "board_z_mm": zs, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "board_z_mm": zs, "depth_span_mm": depth_span,
+                "plane_health": health, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         )
+        warn = "  ⚠ 깊이 다양성이 낮음 — 더 다양한 거리 권장" if health["weak"] else ""
         self.last_message = (
-            f"통합 피팅 완료 — 내부 RMS {rms:.3f}px · 광평면 RMS {fit['rms']:.3f}mm ({len(self.poses)}자세)"
+            f"통합 피팅 완료 — 내부 RMS {rms:.3f}px · 광평면 RMS {fit['rms']:.3f}mm ({len(self.poses)}자세){warn}"
         )
         return {"ok": True, "intrinsic_rms_px": round(float(rms), 4),
                 "plane_rms_mm": round(fit["rms"], 4), "plane_max_mm": round(fit["max"], 4),
                 "n_poses": len(self.poses), "n_points": fit["n_points"],
-                "depth_span_mm": round(float(max(zs) - min(zs)), 1) if zs else 0.0,
+                "depth_span_mm": depth_span, "health": health, "weak": health["weak"],
                 "per_pose": per_pose}
 
     def measure_points(self, uv_a, uv_b) -> dict:
