@@ -1,6 +1,5 @@
 @echo off
 
-call C:\Users\User\miniconda3\Scripts\activate.bat C:\Users\User\miniconda3
-call conda activate ezvision
+call "%~dp0..\.venv\Scripts\activate.bat"
 cd /d "%~dp0"
 python main.py

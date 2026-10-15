@@ -38,6 +38,7 @@ from utils.camera_client import get_frame_bgr
 router = APIRouter(prefix="/laserplane", tags=["laserplane"])
 
 PLANE_DIR = os.path.join(os.path.dirname(__file__), "..", "laserplane_data")
+SESSION_DIR = os.path.join(os.path.dirname(__file__), "..", "session_data")
 FRAME_RETRY_COUNT = 25
 FRAME_RETRY_DELAY_SEC = 0.08
 
@@ -597,12 +598,18 @@ async def combined_fit(camera_id: int):
 @router.post("/combined/save/{camera_id}")
 async def combined_save(camera_id: int, req: SaveRequest = SaveRequest()):
     session = _get_combined(camera_id)
-    if session is None or session.model is None:
-        return JSONResponse(status_code=409, content={"error": "저장할 결과가 없습니다. 먼저 피팅하세요."})
+    if session is None:
+        return JSONResponse(status_code=409, content={"error": "세션이 없습니다. 먼저 시작하세요."})
     name = (req.name or "").strip() or None
-    session.model.meta["name"] = name
-    path = session.model.save(_new_plane_path(camera_id, name))
-    return {"saved": True, "path": os.path.basename(path), "name": name, "meta": session.model.meta}
+    has_model = session.model is not None
+    path = _new_plane_path(camera_id, name)
+    if not has_model:
+        filename = os.path.basename(path).replace("_laserplane_", "_session_", 1)
+        path = os.path.join(SESSION_DIR, filename)
+    session.save(path, name)
+    return {"saved": True, "path": os.path.basename(path), "name": name,
+            "has_model": has_model, "directory": "laserplane_data" if has_model else "session_data",
+            "meta": session.model.meta if has_model else {"name": name}, "status": session.status()}
 
 
 @router.post("/combined/reset/{camera_id}")

@@ -73,7 +73,7 @@ export default function LiveCameraView({ cameraIdBackend, height = 440, flush = 
       }
     } catch (e) {
       setState('offline');
-      setNote('카메라 API 응답 없음 (Camera 서버 7070 확인)');
+      setNote('카메라 API 응답 없음 (Camera 서버 17070 확인)');
       timerRef.current = setTimeout(ensureAndConnect, 4000);
       return;
     }

@@ -460,6 +460,7 @@ class LaserPlaneCombinedSession:
                 "n_onboard": int(len(self.last_onboard_uv))}
 
     def fit(self, min_poses: int = 4) -> dict:
+        self.model = self.plane_fit = None
         if len(self.poses) < min_poses:
             return {"ok": False, "error": f"자세가 {min_poses}개 미만입니다(권장 8~15). 더 캡처하세요"}
         objpoints = [self.objp.astype(np.float32) for _ in self.poses]
@@ -487,29 +488,23 @@ class LaserPlaneCombinedSession:
         pts = np.vstack(allpts)
         fit = fit_plane_svd(pts)
         self.plane_fit = fit
+        if fit is None:
+            return {"ok": False, "error": "평면 피팅 실패(점 부족)",
+                    "intrinsic_rms_px": round(float(rms), 4)}
         zs = [pp["board_z_mm"] for pp in per_pose]
         depth_span = round(float(max(zs) - min(zs)), 1) if zs else 0.0
 
         # ── 퇴화(degenerate) 광평면 감지 ──────────────────────────
         # 레이저 3D 점이 2D 면을 못 채우고 거의 한 직선이면 평면이 유일하게
         # 결정되지 않아 법선이 엉뚱하게 나온다(측정 시 거리 발산·비단조).
-        # 이런 평면은 저장 후 측정을 망치므로 모델을 만들지 않고 거부한다.
+        # 품질 판정은 경고로 보존하고, 계산된 결과의 저장은 허용한다.
         health = plane_health(fit)
         health["depth_span_mm"] = depth_span
+        warning = None
         if health["degenerate"]:
-            self.model = None
-            self.last_message = "광평면 퇴화 감지 — 저장 불가 (다른 거리에서 재캡처 필요)"
-            return {
-                "ok": False, "degenerate": True,
-                "error": ("광평면이 퇴화했습니다(" + ", ".join(health["reasons"]) + "). "
-                          "체커보드를 여러 '거리'(가까이·멀리)와 위·아래 위치로 옮겨가며 다시 캡처하세요. "
-                          f"현재 깊이 범위 {depth_span:.0f}mm — 200mm 이상 권장."),
-                "health": health,
-                "intrinsic_rms_px": round(float(rms), 4),
-                "plane_rms_mm": round(fit["rms"], 4),
-                "n_poses": len(self.poses), "per_pose": per_pose,
-                "status": None,
-            }
+            warning = "광평면 퇴화 감지: " + ", ".join(health["reasons"]) + " — 저장 가능, 다른 거리에서 재캡처 권장"
+        elif health["weak"]:
+            warning = "깊이 다양성이 낮음 — 더 다양한 거리에서 캡처 권장"
 
         self.model = LaserPlaneModel(
             n=fit["n"], d=fit["d"], K=K, dist=dist,
@@ -525,7 +520,7 @@ class LaserPlaneCombinedSession:
                 "plane_health": health, "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
         )
-        warn = "  ⚠ 깊이 다양성이 낮음 — 더 다양한 거리 권장" if health["weak"] else ""
+        warn = f"  ⚠ {warning}" if warning else ""
         self.last_message = (
             f"통합 피팅 완료 — 내부 RMS {rms:.3f}px · 광평면 RMS {fit['rms']:.3f}mm ({len(self.poses)}자세){warn}"
         )
@@ -533,7 +528,32 @@ class LaserPlaneCombinedSession:
                 "plane_rms_mm": round(fit["rms"], 4), "plane_max_mm": round(fit["max"], 4),
                 "n_poses": len(self.poses), "n_points": fit["n_points"],
                 "depth_span_mm": depth_span, "health": health, "weak": health["weak"],
+                "degenerate": health["degenerate"], "warning": warning,
                 "per_pose": per_pose}
+
+    def save(self, path: str, name: Optional[str] = None) -> str:
+        """품질 판정이나 피팅 성공 여부와 무관하게 현재 세션을 보존한다."""
+        if self.model is not None:
+            self.model.meta["name"] = name
+            payload = self.model.to_json()
+        else:
+            payload = {
+                "type": "laser_plane_combined_session", "version": 1,
+                "meta": {"name": name, "camera_id": self.camera_id,
+                         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")},
+            }
+        payload["session"] = {
+            "status": self.status(),
+            "camera_matrix": None if self.K is None else self.K.tolist(),
+            "dist_coeffs": None if self.dist is None else self.dist.reshape(-1).tolist(),
+            "pending_corners": None if self.pending_corners is None else self.pending_corners.tolist(),
+            "poses": [{"corners": pose.corners.tolist(), "laser_uv": pose.laser_uv.tolist()}
+                      for pose in self.poses],
+        }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        return path
 
     def measure_points(self, uv_a, uv_b) -> dict:
         if self.model is None:

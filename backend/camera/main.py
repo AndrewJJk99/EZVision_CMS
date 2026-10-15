@@ -68,7 +68,7 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:7000", "http://localhost:8000"],
+    allow_origins=["http://localhost:13000", "http://127.0.0.1:13000", "http://localhost:17060", "http://localhost:18000"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -92,7 +92,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app", 
         host="0.0.0.0", 
-        port=7070, 
+        port=int(os.environ.get("CAMERA_API_PORT", "17070")),
         reload=enable_reload,
         reload_excludes=["*/__pycache__/*", "*.pyc"],
         workers=1

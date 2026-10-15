@@ -1,6 +1,6 @@
 @echo off
 
-call C:\Users\User\miniconda3\Scripts\activate.bat C:\Users\User\miniconda3
-call conda activate ezvision
+set "PY=%~dp0..\..\.venv\Scripts\python.exe"
 cd /d "%~dp0"
-python main.py
+"%PY%" main.py
+if errorlevel 1 pause

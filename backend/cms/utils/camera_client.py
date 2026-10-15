@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""CMS 서버가 camera 서버(7070)에서 프레임을 HTTP로 가져오는 클라이언트.
+"""CMS 서버가 camera 서버(17070)에서 프레임을 HTTP로 가져오는 클라이언트.
 
 플랫폼 구조상 camera와 cms는 별도 서버(프로세스)라, cms는 카메라 SDK에 직접
 접근하지 않고 camera 서버의 `/camera/frame/{id}` 로 원본 프레임을 요청한다.
@@ -12,7 +12,7 @@ import cv2
 import httpx
 import numpy as np
 
-CAMERA_URL = os.environ.get("CAMERA_URL", "http://localhost:7070")
+CAMERA_URL = os.environ.get("CAMERA_URL", "http://localhost:17070")
 
 # 기존 camera_grab_v2 와 동일한 표시 해상도 상수 (calibration 프리뷰용)
 STREAM_DISPLAY_WIDTH = 1280

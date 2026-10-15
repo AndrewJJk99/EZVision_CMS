@@ -799,7 +799,8 @@ class CameraManager:
             camera_ip_mapping = {}
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
-                    response = await client.get("http://localhost:8000/camera/get_feature")
+                    ui_api_url = os.environ.get("UI_API_URL", "http://localhost:18000").rstrip("/")
+                    response = await client.get(f"{ui_api_url}/camera/get_feature")
                     if response.status_code == 200:
                         camera_features = response.json()
                         for feature in camera_features:

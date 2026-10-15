@@ -1,0 +1,8 @@
+.venv/
+.npm-cache/
+.pip-cache/
+.install-tmp/
+frontend/node_modules/
+frontend/build/
+__pycache__/
+*.py[cod]

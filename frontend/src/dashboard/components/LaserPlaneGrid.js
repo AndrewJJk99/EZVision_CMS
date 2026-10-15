@@ -211,14 +211,16 @@ export default function LaserPlaneGrid() {
   const cFit = () => act(async () => {
     const r = await lpcFit(cam);
     const base = `통합 피팅 완료 · 내부 RMS ${r.intrinsic_rms_px}px · 광평면 RMS ${r.plane_rms_mm}mm · 깊이범위 ${r.depth_span_mm ?? '—'}mm`;
-    if (r.weak) { setSev('warning'); setMsg(`${base} · ⚠ 깊이 다양성 낮음 — 여러 거리에서 더 캡처 권장`); }
+    if (r.warning) { setSev('warning'); setMsg(`${base} · ${r.warning}`); }
     else { setSev('success'); setMsg(base); }
     return r;
   }, false);
   const cSave = () => act(async () => {
     const r = await lpcSave(cam, planeName);
-    await refreshPlanes(r.path);
-    setSev('success'); setMsg(`저장됨: ${r.name || r.path}`); setPlaneName('');
+    if (r.has_model) await refreshPlanes(r.path);
+    setSev('success');
+    setMsg(`${r.has_model ? '캘리브레이션 결과·세션' : '세션'} 저장됨: ${r.name || r.path}${r.has_model ? '' : ' (캡처 데이터·설정 보존)'}`);
+    setPlaneName('');
     return r;
   }, false);
   const cReset = () => act(async () => { const r = await lpcReset(cam); setSev('info'); setMsg('초기화됨'); setOverlay(null); setView('live'); return r; }, false);
@@ -381,7 +383,6 @@ export default function LaserPlaneGrid() {
 
   const nPoses = cstatus?.n_poses ?? 0;
   const pendingOff = cstatus?.pending_off;
-  const fitted = cstatus?.fitted;
   const poseProgress = Math.min(100, (nPoses / RECO_POSES) * 100);
   const gapMm = (liveOn ? liveResult?.distance_mm : measResult?.distance_mm) ?? null;
   const stepMm = (liveOn ? liveResult?.depth_diff_mm : measResult?.depth_diff_mm) ?? null;
@@ -588,10 +589,10 @@ export default function LaserPlaneGrid() {
               </Typography>
             </DemoRow>
             <TextField size="small" fullWidth label="저장 이름" placeholder="예: rig-A 0922"
-              value={planeName} onChange={(e) => setPlaneName(e.target.value)} disabled={loading || !fitted} sx={{ mt: 1, mb: 1 }} />
+              value={planeName} onChange={(e) => setPlaneName(e.target.value)} disabled={loading || !cstatus} sx={{ mt: 1, mb: 1 }} />
             <Stack direction="row" spacing={1}>
               <Button variant="contained" size="small" onClick={cFit} disabled={loading || nPoses < 4}>피팅</Button>
-              <Button variant="outlined" color="success" size="small" startIcon={<SaveRoundedIcon />} onClick={cSave} disabled={loading || !fitted}>저장</Button>
+              <Button variant="outlined" color="success" size="small" startIcon={<SaveRoundedIcon />} onClick={cSave} disabled={loading || !cstatus}>저장</Button>
               <Button variant="text" color="error" size="small" onClick={cReset} disabled={loading || !cstatus}>초기화</Button>
             </Stack>
           </Paper>
